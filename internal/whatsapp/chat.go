@@ -53,3 +53,15 @@ type NotificationEvent struct {
 	Content    string `json:"content"`
 	IsGroup    bool   `json:"isGroup"`
 }
+
+// ChatWithMessages bundles a chat with its recent messages for preloading
+type ChatWithMessages struct {
+	Chat     ChatItem      `json:"chat"`
+	Messages []MessageItem `json:"messages"`
+}
+
+// RecentChatMessagesEvent is emitted after history sync with preloaded messages
+// for chats active in the last 7 days
+type RecentChatMessagesEvent struct {
+	Entries []ChatWithMessages `json:"entries"`
+}
