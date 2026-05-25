@@ -72,3 +72,8 @@ export interface NotificationEvent {
 export interface InitialSyncEvent {
   state: 'running' | 'done';
 }
+
+export interface ChatWithMessages {
+  chat: ChatItem;
+  messages: MessageItem[];
+}

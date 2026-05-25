@@ -173,7 +173,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ...state.pagination,
           [chatJid]: {
             oldestTimestampLoaded: oldest,
-            hasMore: newMsgs.length >= 100,
+            hasMore: newMsgs.length >= 50,
             loadingMore: false,
           },
         },

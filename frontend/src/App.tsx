@@ -4,7 +4,7 @@ import { Sidebar } from './components/Sidebar';
 import { ChatView } from './components/ChatView';
 import { useAuthStore } from './stores/authStore';
 import { useChatStore } from './stores/chatStore';
-import type { ConnectionStatusEvent, MessageEvent, ChatUpdateEvent, ChatItem, NotificationEvent, InitialSyncEvent } from './types';
+import type { ConnectionStatusEvent, MessageEvent, ChatUpdateEvent, ChatItem, NotificationEvent, InitialSyncEvent, ChatWithMessages } from './types';
 import { EventsOn } from '../wailsjs/runtime/runtime';
 
 function FullScreenLoading({ text }: { text: string }) {
@@ -18,7 +18,7 @@ function FullScreenLoading({ text }: { text: string }) {
 
 function App() {
   const { connectionState, setConnectionState, userInfo } = useAuthStore();
-  const { setChats, updateChat, addMessage, setSyncing, initialSyncState, setInitialSyncState } = useChatStore();
+  const { setChats, updateChat, addMessage, setSyncing, initialSyncState, setInitialSyncState, setInitialMessages } = useChatStore();
 
   // Global connection event listener
   useEffect(() => {
@@ -36,6 +36,20 @@ function App() {
     });
     return () => { cancelInitSync(); };
   }, [setInitialSyncState]);
+
+  // Preloaded messages for recent chats (7 days)
+  useEffect(() => {
+    const cancelRecent = EventsOn('wa:recent-chat-messages', (data: { entries: ChatWithMessages[] }) => {
+      if (data?.entries) {
+        for (const entry of data.entries) {
+          if (entry.messages && entry.messages.length > 0) {
+            setInitialMessages(entry.chat.jid, entry.messages);
+          }
+        }
+      }
+    });
+    return () => { cancelRecent(); };
+  }, [setInitialMessages]);
 
   // Chat & message event listeners (only when connected)
   useEffect(() => {
