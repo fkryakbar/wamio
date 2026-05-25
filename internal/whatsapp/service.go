@@ -830,83 +830,81 @@ func (s *WhatsAppService) handleHistorySync(v *events.HistorySync) {
 		isGroup := jid.Server == types.GroupServer
 		chatName := s.getContactName(jid)
 
-		// Process messages in this conversation
-		for _, historyMsg := range conv.GetMessages() {
-			msg := historyMsg.GetMessage()
-			if msg == nil || msg.GetMessage() == nil {
-				continue
-			}
-
-			info := msg.GetMessage()
-			_ = info // we use the wrapper
-
-			content, mediaType := extractMessageContent(msg.GetMessage())
-			if content == "" {
-				continue
-			}
-
-			isFromMe := msg.GetKey().GetFromMe()
-			senderJID := jidStr
-			senderName := chatName
-
-			if isFromMe && s.client != nil && s.client.Store.ID != nil {
-				senderJID = s.client.Store.ID.String()
-				senderName = "Anda"
-			} else if msg.GetKey().GetParticipant() != "" {
-				participantJID, pErr := types.ParseJID(msg.GetKey().GetParticipant())
-				if pErr == nil {
-					senderJID = participantJID.String()
-					senderName = s.getContactName(participantJID)
-				}
-			}
-
-			ts := int64(msg.GetMessageTimestamp())
-
-			msgItem := MessageItem{
-				ID:         msg.GetKey().GetID(),
-				ChatJID:    jidStr,
-				SenderJID:  senderJID,
-				SenderName: senderName,
-				Content:    content,
-				Timestamp:  ts,
-				IsFromMe:   isFromMe,
-				IsRead:     true,
-				MediaType:  mediaType,
-			}
-
-			s.addMessageToCache(jidStr, msgItem)
-		}
-
-		// Sort messages by timestamp
+		// Ensure chat metadata exists in cache (messages loaded on-demand via GetMessagesPage)
 		s.chatMu.Lock()
-		if msgs, ok := s.messages[jidStr]; ok && len(msgs) > 0 {
-			sort.Slice(msgs, func(i, j int) bool {
-				return msgs[i].Timestamp < msgs[j].Timestamp
-			})
-			s.messages[jidStr] = msgs
-
-			// Update chat entry with last message
-			lastMsg := msgs[len(msgs)-1]
-
-			chat, exists := s.chats[jidStr]
-			if !exists {
-				chat = &ChatItem{
-					JID:     jidStr,
-					Name:    chatName,
-					IsGroup: isGroup,
-				}
-				s.chats[jidStr] = chat
+		chat, exists := s.chats[jidStr]
+		if !exists {
+			chat = &ChatItem{
+				JID:     jidStr,
+				Name:    chatName,
+				IsGroup: isGroup,
 			}
-			chat.LastMessage = lastMsg.Content
-			chat.LastMessageTime = lastMsg.Timestamp
-			chat.UnreadCount = int(conv.GetUnreadCount())
+			s.chats[jidStr] = chat
 		}
+		chat.UnreadCount = int(conv.GetUnreadCount())
 		s.chatMu.Unlock()
 	}
 
 	// Emit full chat list update to frontend
 	s.emitEvent("wa:chats-sync", s.GetChats())
+
+	// Preload recent-chat messages (7 days, 20 messages each)
+	recentEntries := s.GetRecentChatsWithMessages(7, 20)
+	s.emitEvent("wa:recent-chat-messages", RecentChatMessagesEvent{Entries: recentEntries})
+
 	s.emitInitialSync("done")
+}
+
+// GetRecentChatsWithMessages returns preloaded messages for chats active within `days`.
+// Used to emit wa:recent-chat-messages after history sync so the frontend can
+// hydrate recent conversations without extra round-trips.
+func (s *WhatsAppService) GetRecentChatsWithMessages(days int, msgLimit int) []ChatWithMessages {
+	if s.chatStore == nil {
+		return nil
+	}
+
+	since := time.Now().Unix() - int64(days*86400)
+	recentChats, err := s.chatStore.GetRecentChats(since)
+	if err != nil {
+		s.log.Warnf("Failed to load recent chats: %v", err)
+		return nil
+	}
+
+	result := make([]ChatWithMessages, 0, len(recentChats))
+	for _, c := range recentChats {
+		dbMsgs, err := s.chatStore.GetMessages(c.JID, msgLimit)
+		if err != nil {
+			continue
+		}
+		msgs := make([]MessageItem, len(dbMsgs))
+		for i, m := range dbMsgs {
+			msgs[i] = MessageItem{
+				ID:            m.ID,
+				ChatJID:       m.ChatJID,
+				SenderJID:     m.SenderJID,
+				SenderName:    m.SenderName,
+				Content:       m.Content,
+				Timestamp:     m.Timestamp,
+				IsFromMe:      m.IsFromMe,
+				IsRead:        m.IsRead,
+				MediaType:     m.MediaType,
+				MediaDuration: m.MediaDuration,
+				FileName:      m.FileName,
+				Mimetype:      m.Mimetype,
+				IsPTT:         m.IsPTT,
+			}
+		}
+		chat := ChatItem{
+			JID:             c.JID,
+			Name:            c.Name,
+			LastMessage:     c.LastMessage,
+			LastMessageTime: c.LastMessageTime,
+			UnreadCount:     c.UnreadCount,
+			IsGroup:         c.IsGroup,
+		}
+		result = append(result, ChatWithMessages{Chat: chat, Messages: msgs})
+	}
+	return result
 }
 
 // MarkChatRead resets the unread count for a chat
