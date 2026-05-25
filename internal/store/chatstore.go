@@ -133,6 +133,32 @@ func (cs *ChatStore) GetAllChats() ([]ChatRow, error) {
 	return chats, rows.Err()
 }
 
+// GetRecentChats returns chats whose last_message_time >= sinceTimestamp
+func (cs *ChatStore) GetRecentChats(sinceTimestamp int64) ([]ChatRow, error) {
+	rows, err := cs.db.Query(`
+		SELECT jid, name, last_message, last_message_time, unread_count, is_group
+		FROM wamio_chats
+		WHERE last_message_time >= ?
+		ORDER BY last_message_time DESC
+	`, sinceTimestamp)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var chats []ChatRow
+	for rows.Next() {
+		var c ChatRow
+		var isGroup int
+		if err := rows.Scan(&c.JID, &c.Name, &c.LastMessage, &c.LastMessageTime, &c.UnreadCount, &isGroup); err != nil {
+			return nil, err
+		}
+		c.IsGroup = isGroup != 0
+		chats = append(chats, c)
+	}
+	return chats, rows.Err()
+}
+
 // GetMessages returns messages for a chat, ordered by timestamp, limited to `limit`
 func (cs *ChatStore) GetMessages(chatJID string, limit int) ([]MessageRow, error) {
 	rows, err := cs.db.Query(`
