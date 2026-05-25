@@ -1,0 +1,51 @@
+# Node / frontend
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/.cache/
+
+# Build outputs
+build/bin/
+build/*.exe
+build/*.app
+build/*.dmg
+build/*.deb
+build/*.rpm
+build/*.AppImage
+build/*.msi
+build/*.zip
+build/*.tar.gz
+build/*.tgz
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go
+bin/
+*.test
+*.out
+coverage.out
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env / secrets
+.env
+.env.*
+*.local
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
