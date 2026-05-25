@@ -109,14 +109,29 @@ export function ChatView() {
   const containerRef = useRef<HTMLDivElement>(null);
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const prevMessageCountRef = useRef(0);
+  const isAtBottomRef = useRef(true);
 
-  // Auto-scroll to bottom when new messages arrive
+  // Auto-scroll to bottom when new messages arrive (only if user is at bottom)
   useEffect(() => {
     if (messagesEndRef.current && chatMessages.length > prevMessageCountRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+      if (isAtBottomRef.current) {
+        messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+      }
     }
     prevMessageCountRef.current = chatMessages.length;
   }, [chatMessages.length]);
+
+  // Scroll to bottom (instant) when switching chats
+  useEffect(() => {
+    if (!activeChatJID) return;
+    // Wait a tick for the DOM to paint messages
+    const timer = setTimeout(() => {
+      if (messagesEndRef.current) {
+        messagesEndRef.current.scrollIntoView({ behavior: 'instant' as ScrollBehavior });
+      }
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [activeChatJID]);
 
   // Load initial 20 messages when active chat changes
   useEffect(() => {
@@ -138,6 +153,11 @@ export function ChatView() {
   const onScroll = useCallback(() => {
     const el = containerRef.current;
     if (!el || !activeChatJID) return;
+
+    // Track whether user is at the bottom (for auto-scroll guard)
+    const threshold = 80;
+    isAtBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
+
     if (el.scrollTop > 80) return;
 
     const page = pagination[activeChatJID];
@@ -145,7 +165,7 @@ export function ChatView() {
 
     setLoadingMore(activeChatJID, true);
     import('../../wailsjs/go/whatsapp/WhatsAppService').then((mod) => {
-      mod.GetMessagesPage(activeChatJID, 100, page.oldestTimestampLoaded)
+      mod.GetMessagesPage(activeChatJID, 50, page.oldestTimestampLoaded)
         .then((msgs: MessageItem[]) => {
           if (msgs && msgs.length > 0) {
             prependMessagesPage(activeChatJID, msgs);
