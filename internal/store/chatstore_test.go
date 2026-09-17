@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 )
@@ -101,6 +102,30 @@ func TestChatStore_GetMessagesBefore(t *testing.T) {
 	})
 }
 
+func TestChatStore_MessageContextPreservesThumbnail(t *testing.T) {
+	cs := setupTestChatStore(t)
+	chatJID := "test@s.whatsapp.net"
+	for index := 1; index <= 5; index++ {
+		row := MessageRow{ID: fmt.Sprintf("message-%d", index), ChatJID: chatJID, Timestamp: int64(index * 100), Content: "content"}
+		if index == 3 {
+			row.MediaType, row.Mimetype, row.Thumbnail = "image", "image/jpeg", "thumb-data"
+		}
+		if err := cs.UpsertMessage(row); err != nil {
+			t.Fatalf("UpsertMessage: %v", err)
+		}
+	}
+	context, err := cs.GetMessagesAround(chatJID, "message-3", 5)
+	if err != nil {
+		t.Fatalf("GetMessagesAround: %v", err)
+	}
+	if len(context) != 5 || context[2].ID != "message-3" {
+		t.Fatalf("unexpected context: %#v", context)
+	}
+	if context[2].Thumbnail != "thumb-data" {
+		t.Fatalf("thumbnail was not persisted: %#v", context[2])
+	}
+}
+
 func TestChatStorePreviewKeepsNewestMessageOrder(t *testing.T) {
 	cs := setupTestChatStore(t)
 	chat := ChatRow{JID: "test@s.whatsapp.net", LastMessage: "new", LastMessageTime: 100, LastMessageID: "new", LastMessageOrder: 20}
@@ -138,5 +163,70 @@ func TestChatStoreReceiptDoesNotDowngradeRead(t *testing.T) {
 	}
 	if rows[0].DeliveryStatus != "read" || !rows[0].IsRead {
 		t.Fatalf("receipt regressed: %#v", rows[0])
+	}
+}
+
+func TestChatStorePersistsPreviewMetadataAndArchive(t *testing.T) {
+	cs := setupTestChatStore(t)
+	chat := ChatRow{
+		JID:               "test@s.whatsapp.net",
+		LastMessage:       "pesan terkirim",
+		LastMessageTime:   100,
+		LastMessageID:     "outgoing",
+		LastMessageFromMe: true,
+		LastMessageStatus: "read",
+		IsArchived:        true,
+	}
+	if err := cs.UpsertChat(chat); err != nil {
+		t.Fatal(err)
+	}
+
+	// A stale history replay must not replace the read tick for the same
+	// preview, while a current archive state remains persisted.
+	chat.LastMessageStatus = "sent"
+	if err := cs.UpsertChat(chat); err != nil {
+		t.Fatal(err)
+	}
+
+	chats, err := cs.GetAllChats()
+	if err != nil || len(chats) != 1 {
+		t.Fatalf("GetAllChats: rows=%d err=%v", len(chats), err)
+	}
+	got := chats[0]
+	if !got.LastMessageFromMe || got.LastMessageStatus != "read" || !got.IsArchived {
+		t.Fatalf("preview metadata not persisted: %#v", got)
+	}
+}
+
+func TestChatStoreIncomingReadPersistsAcrossHistoryUpsert(t *testing.T) {
+	cs := setupTestChatStore(t)
+	chatJID := "test@s.whatsapp.net"
+	if err := cs.UpsertChat(ChatRow{JID: chatJID, UnreadCount: 1, LastMessageTime: 100}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cs.UpsertMessage(MessageRow{ID: "incoming", ChatJID: chatJID, SenderJID: chatJID, Timestamp: 100, IsRead: false}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cs.MarkIncomingMessagesRead(chatJID, []string{"incoming"}, 150); err != nil {
+		t.Fatal(err)
+	}
+	// A late history replay must not restore a stale unread badge or make the
+	// message unread again.
+	if err := cs.UpsertChat(ChatRow{JID: chatJID, UnreadCount: 1, LastMessageTime: 100}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cs.UpsertMessage(MessageRow{ID: "incoming", ChatJID: chatJID, SenderJID: chatJID, Timestamp: 100, IsRead: false}); err != nil {
+		t.Fatal(err)
+	}
+	chats, err := cs.GetAllChats()
+	if err != nil || len(chats) != 1 {
+		t.Fatalf("GetAllChats: rows=%d err=%v", len(chats), err)
+	}
+	if chats[0].UnreadCount != 0 || chats[0].LastReadAt != 150 {
+		t.Fatalf("read boundary regressed: %#v", chats[0])
+	}
+	messages, err := cs.GetMessages(chatJID, 1)
+	if err != nil || len(messages) != 1 || !messages[0].IsRead {
+		t.Fatalf("message read state regressed: %#v err=%v", messages, err)
 	}
 }

@@ -165,10 +165,40 @@ func TestChatFilterExcludesStatusAndChannels(t *testing.T) {
 }
 
 func TestPreviewDistinguishesOwnMessage(t *testing.T) {
-	if got := previewForMessage(MessageItem{Content: "halo", IsFromMe: true}, false); got != "Anda: halo" {
+	if got := previewForMessage(MessageItem{Content: "halo", IsFromMe: true}, false); got != "halo" {
 		t.Fatalf("own preview = %q", got)
+	}
+	if got := previewForMessage(MessageItem{Content: "halo", IsFromMe: true, SenderName: "Anda"}, true); got != "halo" {
+		t.Fatalf("own group preview = %q", got)
 	}
 	if got := previewForMessage(MessageItem{Content: "halo", SenderName: "Budi"}, true); got != "Budi: halo" {
 		t.Fatalf("group preview = %q", got)
+	}
+}
+
+func TestAdvanceDeliveryStatusNeverRegresses(t *testing.T) {
+	if got := advanceDeliveryStatus("sent", "delivered"); got != "delivered" {
+		t.Fatalf("sent -> delivered = %q", got)
+	}
+	if got := advanceDeliveryStatus("read", "delivered"); got != "read" {
+		t.Fatalf("read receipt regressed to %q", got)
+	}
+}
+
+func TestApplyHistoryReadStateUsesUnreadSuffix(t *testing.T) {
+	items := []orderedHistoryMessage{
+		{item: MessageItem{ID: "old", IsFromMe: false}},
+		{item: MessageItem{ID: "mine", IsFromMe: true}},
+		{item: MessageItem{ID: "new", IsFromMe: false}},
+	}
+	applyHistoryReadState(items, 1)
+	if !items[0].item.IsRead {
+		t.Fatal("incoming message before the unread boundary must be read")
+	}
+	if !items[1].item.IsRead {
+		t.Fatal("own message must always be read")
+	}
+	if items[2].item.IsRead {
+		t.Fatal("newest unread incoming message must remain unread")
 	}
 }

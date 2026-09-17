@@ -17,10 +17,10 @@ import (
 
 // MediaCache manages downloaded media files and raw message protos
 type MediaCache struct {
-	basePath  string
-	rawMsgs   map[string]*waProto.Message // keyed by "chatJID:messageID"
-	mu        sync.RWMutex
-	log       waLog.Logger
+	basePath string
+	rawMsgs  map[string]*waProto.Message // keyed by "chatJID:messageID"
+	mu       sync.RWMutex
+	log      waLog.Logger
 }
 
 // NewMediaCache creates a new media cache at the given base directory
@@ -75,6 +75,27 @@ func (mc *MediaCache) GetCachedPath(chatJID, messageID, ext string) string {
 		return path
 	}
 	return ""
+}
+
+// CachedMediaPath returns a durable cache path without reading the file.
+func (mc *MediaCache) CachedMediaPath(chatJID, messageID, mimetype, mediaType, fileName string) string {
+	ext := getExtFromMime(mimetype, ".bin")
+	switch mediaType {
+	case "image":
+		ext = getExtFromMime(mimetype, ".jpg")
+	case "audio":
+		ext = getExtFromMime(mimetype, ".ogg")
+	case "video":
+		ext = getExtFromMime(mimetype, ".mp4")
+	case "sticker":
+		ext = ".webp"
+	case "document":
+		ext = getExtFromMime(mimetype, ".bin")
+		if candidate := filepath.Ext(fileName); candidate != "" {
+			ext = candidate
+		}
+	}
+	return mc.GetCachedPath(chatJID, messageID, ext)
 }
 
 // SaveMedia downloads media from the raw message proto and saves to disk
@@ -146,6 +167,18 @@ func (mc *MediaCache) ReadMediaAsBase64(filePath string) (string, error) {
 		return "", fmt.Errorf("failed to read media file: %w", err)
 	}
 	return base64.StdEncoding.EncodeToString(data), nil
+}
+
+// ReadCachedMedia returns already-downloaded media without requiring a raw
+// WhatsApp message or an active connection. This makes cached images survive
+// component unmounts and chat switches.
+func (mc *MediaCache) ReadCachedMedia(chatJID, messageID, mimetype, mediaType, fileName string) (string, bool, error) {
+	path := mc.CachedMediaPath(chatJID, messageID, mimetype, mediaType, fileName)
+	if path == "" {
+		return "", false, nil
+	}
+	data, err := mc.ReadMediaAsBase64(path)
+	return data, err == nil, err
 }
 
 // OpenFile opens a file with the OS default application

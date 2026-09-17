@@ -10,12 +10,40 @@ export function Connect(arg1) {
   return window['go']['whatsapp']['WhatsAppService']['Connect'](arg1);
 }
 
+export function DeleteMessageForEveryone(arg1, arg2) {
+  return window['go']['whatsapp']['WhatsAppService']['DeleteMessageForEveryone'](arg1, arg2);
+}
+
+export function DeleteMessageForMe(arg1, arg2) {
+  return window['go']['whatsapp']['WhatsAppService']['DeleteMessageForMe'](arg1, arg2);
+}
+
 export function Disconnect() {
   return window['go']['whatsapp']['WhatsAppService']['Disconnect']();
 }
 
+export function DownloadDocument(arg1, arg2) {
+  return window['go']['whatsapp']['WhatsAppService']['DownloadDocument'](arg1, arg2);
+}
+
 export function DownloadMedia(arg1, arg2) {
   return window['go']['whatsapp']['WhatsAppService']['DownloadMedia'](arg1, arg2);
+}
+
+export function ForwardMessages(arg1, arg2, arg3) {
+  return window['go']['whatsapp']['WhatsAppService']['ForwardMessages'](arg1, arg2, arg3);
+}
+
+export function GetCachedMedia(arg1, arg2) {
+  return window['go']['whatsapp']['WhatsAppService']['GetCachedMedia'](arg1, arg2);
+}
+
+export function GetChatLists() {
+  return window['go']['whatsapp']['WhatsAppService']['GetChatLists']();
+}
+
+export function GetChatProfile(arg1) {
+  return window['go']['whatsapp']['WhatsAppService']['GetChatProfile'](arg1);
 }
 
 export function GetChats() {
@@ -30,8 +58,16 @@ export function GetConnectionState() {
   return window['go']['whatsapp']['WhatsAppService']['GetConnectionState']();
 }
 
+export function GetDocumentState(arg1, arg2) {
+  return window['go']['whatsapp']['WhatsAppService']['GetDocumentState'](arg1, arg2);
+}
+
 export function GetMessages(arg1, arg2) {
   return window['go']['whatsapp']['WhatsAppService']['GetMessages'](arg1, arg2);
+}
+
+export function GetMessagesAround(arg1, arg2, arg3) {
+  return window['go']['whatsapp']['WhatsAppService']['GetMessagesAround'](arg1, arg2, arg3);
 }
 
 export function GetMessagesPage(arg1, arg2, arg3) {
@@ -62,16 +98,40 @@ export function MarkChatRead(arg1) {
   return window['go']['whatsapp']['WhatsAppService']['MarkChatRead'](arg1);
 }
 
+export function OpenChat(arg1) {
+  return window['go']['whatsapp']['WhatsAppService']['OpenChat'](arg1);
+}
+
 export function OpenDocument(arg1, arg2) {
   return window['go']['whatsapp']['WhatsAppService']['OpenDocument'](arg1, arg2);
+}
+
+export function OpenExternalURL(arg1) {
+  return window['go']['whatsapp']['WhatsAppService']['OpenExternalURL'](arg1);
+}
+
+export function ReactToMessage(arg1, arg2, arg3) {
+  return window['go']['whatsapp']['WhatsAppService']['ReactToMessage'](arg1, arg2, arg3);
 }
 
 export function RequestOlderMessages(arg1, arg2, arg3, arg4, arg5) {
   return window['go']['whatsapp']['WhatsAppService']['RequestOlderMessages'](arg1, arg2, arg3, arg4, arg5);
 }
 
+export function RestoreLastSession() {
+  return window['go']['whatsapp']['WhatsAppService']['RestoreLastSession']();
+}
+
+export function SaveDocumentAs(arg1, arg2) {
+  return window['go']['whatsapp']['WhatsAppService']['SaveDocumentAs'](arg1, arg2);
+}
+
 export function SendMessage(arg1, arg2) {
   return window['go']['whatsapp']['WhatsAppService']['SendMessage'](arg1, arg2);
+}
+
+export function SendReply(arg1, arg2, arg3) {
+  return window['go']['whatsapp']['WhatsAppService']['SendReply'](arg1, arg2, arg3);
 }
 
 export function SetContext(arg1) {

@@ -20,6 +20,7 @@ export function LoginPage() {
   const [isConnecting, setIsConnecting] = useState(false);
   const bindingsRef = useRef<{
     Connect: (id: string) => Promise<void>;
+		RestoreLastSession: () => Promise<{ attempted: boolean }>;
     IsLoggedIn: () => Promise<boolean>;
     GetUserInfo: () => Promise<any>;
   } | null>(null);
@@ -32,17 +33,20 @@ export function LoginPage() {
         const mod = await import('../../wailsjs/go/whatsapp/WhatsAppService');
         bindingsRef.current = {
           Connect: mod.Connect,
+			RestoreLastSession: mod.RestoreLastSession,
           IsLoggedIn: mod.IsLoggedIn,
           GetUserInfo: mod.GetUserInfo,
         };
 
-        // Check if already logged in
-        const loggedIn = await mod.IsLoggedIn();
-        if (loggedIn) {
-          setConnectionState('connected');
-          const info = await mod.GetUserInfo();
-          if (info) setUserInfo(info);
-        }
+        // Restore the most recently successful linked session automatically.
+			setIsConnecting(true);
+			try {
+				const restored = await mod.RestoreLastSession();
+				if (!restored.attempted) setIsConnecting(false);
+			} catch {
+				setIsConnecting(false);
+				setConnectionState('disconnected');
+			}
       } catch (err) {
         console.warn('Go bindings not available yet (normal during first build):', err);
       }
@@ -60,6 +64,7 @@ export function LoginPage() {
 
     const cancelConn = EventsOn('wa:connection', (data: ConnectionStatusEvent) => {
       setConnectionState(data.state);
+		if (data.state === 'disconnected' || data.state === 'logged_out') setIsConnecting(false);
       if (data.state === 'connected' && bindingsRef.current) {
         bindingsRef.current.GetUserInfo()
           .then((info) => { if (info) setUserInfo(info); })

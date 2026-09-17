@@ -8,9 +8,23 @@ export function CheckRegistered(arg1:string):Promise<boolean>;
 
 export function Connect(arg1:string):Promise<void>;
 
+export function DeleteMessageForEveryone(arg1:string,arg2:string):Promise<void>;
+
+export function DeleteMessageForMe(arg1:string,arg2:string):Promise<void>;
+
 export function Disconnect():Promise<void>;
 
+export function DownloadDocument(arg1:string,arg2:string):Promise<whatsapp.DocumentState>;
+
 export function DownloadMedia(arg1:string,arg2:string):Promise<string>;
+
+export function ForwardMessages(arg1:string,arg2:Array<string>,arg3:Array<string>):Promise<Array<whatsapp.ForwardResult>>;
+
+export function GetCachedMedia(arg1:string,arg2:string):Promise<string>;
+
+export function GetChatLists():Promise<Array<whatsapp.ChatList>>;
+
+export function GetChatProfile(arg1:string):Promise<whatsapp.ChatProfile>;
 
 export function GetChats():Promise<Array<whatsapp.ChatItem>>;
 
@@ -18,7 +32,11 @@ export function GetClient():Promise<whatsmeow.Client>;
 
 export function GetConnectionState():Promise<whatsapp.ConnectionState>;
 
+export function GetDocumentState(arg1:string,arg2:string):Promise<whatsapp.DocumentState>;
+
 export function GetMessages(arg1:string,arg2:number):Promise<Array<whatsapp.MessageItem>>;
+
+export function GetMessagesAround(arg1:string,arg2:string,arg3:number):Promise<whatsapp.MessagePage>;
 
 export function GetMessagesPage(arg1:string,arg2:number,arg3:number):Promise<whatsapp.MessagePage>;
 
@@ -34,10 +52,22 @@ export function Logout():Promise<void>;
 
 export function MarkChatRead(arg1:string):Promise<void>;
 
+export function OpenChat(arg1:string):Promise<void>;
+
 export function OpenDocument(arg1:string,arg2:string):Promise<void>;
+
+export function OpenExternalURL(arg1:string):Promise<void>;
+
+export function ReactToMessage(arg1:string,arg2:string,arg3:string):Promise<void>;
 
 export function RequestOlderMessages(arg1:string,arg2:string,arg3:boolean,arg4:number,arg5:number):Promise<void>;
 
+export function RestoreLastSession():Promise<whatsapp.RestoreSessionResult>;
+
+export function SaveDocumentAs(arg1:string,arg2:string):Promise<boolean>;
+
 export function SendMessage(arg1:string,arg2:string):Promise<void>;
+
+export function SendReply(arg1:string,arg2:string,arg3:whatsapp.MessageReference):Promise<void>;
 
 export function SetContext(arg1:context.Context):Promise<void>;

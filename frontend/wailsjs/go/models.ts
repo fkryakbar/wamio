@@ -180,6 +180,26 @@ export namespace waAdv {
 
 export namespace whatsapp {
 	
+	export class CallInfo {
+	    callId: string;
+	    outcome: string;
+	    duration?: number;
+	    isVideo: boolean;
+	    isIncoming: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new CallInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.callId = source["callId"];
+	        this.outcome = source["outcome"];
+	        this.duration = source["duration"];
+	        this.isVideo = source["isVideo"];
+	        this.isIncoming = source["isIncoming"];
+	    }
+	}
 	export class ChatItem {
 	    jid: string;
 	    name: string;
@@ -187,6 +207,13 @@ export namespace whatsapp {
 	    lastMessageTime: number;
 	    unreadCount: number;
 	    isGroup: boolean;
+	    lastMessageFromMe: boolean;
+	    lastMessageStatus: string;
+	    isArchived: boolean;
+	    isPinned: boolean;
+	    isMuted: boolean;
+	    mutedUntil: number;
+	    listIds?: string[];
 	    avatar?: string;
 	
 	    static createFrom(source: any = {}) {
@@ -201,7 +228,98 @@ export namespace whatsapp {
 	        this.lastMessageTime = source["lastMessageTime"];
 	        this.unreadCount = source["unreadCount"];
 	        this.isGroup = source["isGroup"];
+	        this.lastMessageFromMe = source["lastMessageFromMe"];
+	        this.lastMessageStatus = source["lastMessageStatus"];
+	        this.isArchived = source["isArchived"];
+	        this.isPinned = source["isPinned"];
+	        this.isMuted = source["isMuted"];
+	        this.mutedUntil = source["mutedUntil"];
+	        this.listIds = source["listIds"];
 	        this.avatar = source["avatar"];
+	    }
+	}
+	export class ChatList {
+	    id: string;
+	    name: string;
+	    type: string;
+	    order: number;
+	    isActive: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new ChatList(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.type = source["type"];
+	        this.order = source["order"];
+	        this.isActive = source["isActive"];
+	    }
+	}
+	export class ChatProfile {
+	    jid: string;
+	    name: string;
+	    avatar?: string;
+	    isGroup: boolean;
+	    phoneNumber?: string;
+	    description?: string;
+	    participantCount?: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ChatProfile(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.jid = source["jid"];
+	        this.name = source["name"];
+	        this.avatar = source["avatar"];
+	        this.isGroup = source["isGroup"];
+	        this.phoneNumber = source["phoneNumber"];
+	        this.description = source["description"];
+	        this.participantCount = source["participantCount"];
+	    }
+	}
+	export class MessageReaction {
+	    emoji: string;
+	    count: number;
+	    fromMe: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new MessageReaction(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.emoji = source["emoji"];
+	        this.count = source["count"];
+	        this.fromMe = source["fromMe"];
+	    }
+	}
+	export class MessageReference {
+	    id: string;
+	    chatJid: string;
+	    senderJid: string;
+	    senderName: string;
+	    content: string;
+	    mediaType?: string;
+	    isFromMe: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new MessageReference(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.chatJid = source["chatJid"];
+	        this.senderJid = source["senderJid"];
+	        this.senderName = source["senderName"];
+	        this.content = source["content"];
+	        this.mediaType = source["mediaType"];
+	        this.isFromMe = source["isFromMe"];
 	    }
 	}
 	export class MessageItem {
@@ -218,8 +336,17 @@ export namespace whatsapp {
 	    mediaDuration?: number;
 	    fileName?: string;
 	    mimetype?: string;
+	    thumbnail?: string;
 	    isPtt?: boolean;
 	    deliveryStatus?: string;
+	    replyTo?: MessageReference;
+	    isForwarded?: boolean;
+	    isDeleted?: boolean;
+	    caption?: string;
+	    fileSize?: number;
+	    kind?: string;
+	    call?: CallInfo;
+	    reactions?: MessageReaction[];
 	
 	    static createFrom(source: any = {}) {
 	        return new MessageItem(source);
@@ -240,9 +367,36 @@ export namespace whatsapp {
 	        this.mediaDuration = source["mediaDuration"];
 	        this.fileName = source["fileName"];
 	        this.mimetype = source["mimetype"];
+	        this.thumbnail = source["thumbnail"];
 	        this.isPtt = source["isPtt"];
 	        this.deliveryStatus = source["deliveryStatus"];
+	        this.replyTo = this.convertValues(source["replyTo"], MessageReference);
+	        this.isForwarded = source["isForwarded"];
+	        this.isDeleted = source["isDeleted"];
+	        this.caption = source["caption"];
+	        this.fileSize = source["fileSize"];
+	        this.kind = source["kind"];
+	        this.call = this.convertValues(source["call"], CallInfo);
+	        this.reactions = this.convertValues(source["reactions"], MessageReaction);
 	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 	export class ChatWithMessages {
 	    chat: ChatItem;
@@ -275,6 +429,38 @@ export namespace whatsapp {
 		    }
 		    return a;
 		}
+	}
+	export class DocumentState {
+	    downloaded: boolean;
+	    fileName: string;
+	    fileSize: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new DocumentState(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.downloaded = source["downloaded"];
+	        this.fileName = source["fileName"];
+	        this.fileSize = source["fileSize"];
+	    }
+	}
+	export class ForwardResult {
+	    chatJid: string;
+	    success: boolean;
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ForwardResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.chatJid = source["chatJid"];
+	        this.success = source["success"];
+	        this.error = source["error"];
+	    }
 	}
 	
 	export class MessagePage {
@@ -310,6 +496,22 @@ export namespace whatsapp {
 		    }
 		    return a;
 		}
+	}
+	
+	
+	export class RestoreSessionResult {
+	    attempted: boolean;
+	    accountId?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new RestoreSessionResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.attempted = source["attempted"];
+	        this.accountId = source["accountId"];
+	    }
 	}
 	export class UserInfo {
 	    jid: string;
