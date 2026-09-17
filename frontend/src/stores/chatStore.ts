@@ -1,9 +1,10 @@
 import { create } from 'zustand';
-import type { ChatItem, MessageItem } from '../types';
+import type { ChatItem, MessageItem, MessagePage } from '../types';
 
 interface PaginationMeta {
   oldestTimestampLoaded: number;
-  hasMore: boolean;
+  hasMoreLocal: boolean;
+  canRequestOlder: boolean;
   loadingMore: boolean;
 }
 
@@ -14,22 +15,27 @@ interface ChatState {
   messages: Record<string, MessageItem[]>; // keyed by chat JID
   searchQuery: string;
   isSyncing: boolean;
-  initialSyncState: 'running' | 'done';
+  initialSyncState: 'running' | 'done' | 'failed';
+  initialSyncError: string;
   pagination: Record<string, PaginationMeta>;
+  syncProgressCount: number;
 
   // Actions
   setChats: (chats: ChatItem[]) => void;
   updateChat: (chat: ChatItem) => void;
   setActiveChat: (jid: string | null) => void;
   addMessage: (chatJid: string, message: MessageItem) => void;
+  updateMessageReceipts: (chatJid: string, ids: string[], status: 'delivered' | 'read') => void;
   setMessages: (chatJid: string, messages: MessageItem[]) => void;
-  setInitialMessages: (chatJid: string, msgs: MessageItem[]) => void;
-  prependMessagesPage: (chatJid: string, msgs: MessageItem[]) => void;
+  setInitialMessages: (chatJid: string, page: MessagePage) => void;
+  prependMessagesPage: (chatJid: string, page: MessagePage) => void;
   setSearchQuery: (query: string) => void;
   markChatRead: (jid: string) => void;
   setSyncing: (syncing: boolean) => void;
-  setInitialSyncState: (state: 'running' | 'done') => void;
+  setInitialSyncState: (state: 'running' | 'done' | 'failed', error?: string) => void;
   setLoadingMore: (chatJid: string, loading: boolean) => void;
+  setChatAvatar: (jid: string, avatar: string) => void;
+  addSyncProgress: (count: number) => void;
   reset: () => void;
 
   // Computed
@@ -44,7 +50,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   searchQuery: '',
   isSyncing: true,
   initialSyncState: 'running',
+  initialSyncError: '',
   pagination: {},
+  syncProgressCount: 0,
 
   setChats: (incoming) =>
     set((state) => {
@@ -55,7 +63,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       for (const c of incoming) {
         const existing = chatMap.get(c.jid);
         if (existing) {
-          if (c.lastMessageTime >= existing.lastMessageTime) {
+          if (c.lastMessageTime > existing.lastMessageTime ||
+              (c.lastMessageTime === existing.lastMessageTime && c.lastMessage === existing.lastMessage)) {
             chatMap.set(c.jid, c);
           } else {
             chatMap.set(c.jid, {
@@ -110,6 +119,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
       };
     }),
 
+  updateMessageReceipts: (chatJid, ids, status) =>
+    set((state) => ({
+      messages: {
+        ...state.messages,
+        [chatJid]: (state.messages[chatJid] || []).map((message) =>
+          message.isFromMe && ids.includes(message.id)
+            ? { ...message, deliveryStatus: status, isRead: status === 'read' }
+            : message
+        ),
+      },
+    })),
+
   setMessages: (chatJid, messages) =>
     set((state) => {
       const seen = new Set<string>();
@@ -127,8 +148,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       };
     }),
 
-  setInitialMessages: (chatJid, msgs) =>
+  setInitialMessages: (chatJid, page) =>
     set((state) => {
+      const msgs = page.messages;
       const seen = new Set<string>();
       const deduped = msgs.filter((m) => {
         const key = m.id || `${m.timestamp}-${m.content}-${m.isFromMe}`;
@@ -146,19 +168,34 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ...state.pagination,
           [chatJid]: {
             oldestTimestampLoaded: oldest,
-            hasMore: deduped.length >= 20,
+            hasMoreLocal: page.hasMoreLocal,
+            canRequestOlder: page.canRequestOlder,
             loadingMore: false,
           },
         },
       };
     }),
 
-  prependMessagesPage: (chatJid, msgs) =>
+  prependMessagesPage: (chatJid, pageResult) =>
     set((state) => {
+      const msgs = pageResult.messages;
       const existing = state.messages[chatJid] || [];
       const existingIds = new Set(existing.map((m) => m.id).filter(Boolean));
       const newMsgs = msgs.filter((m) => !existingIds.has(m.id));
-      if (newMsgs.length === 0) return state;
+      if (newMsgs.length === 0) {
+        const page = state.pagination[chatJid];
+        return {
+          pagination: {
+            ...state.pagination,
+            [chatJid]: {
+              oldestTimestampLoaded: page?.oldestTimestampLoaded ?? 0,
+              hasMoreLocal: pageResult.hasMoreLocal,
+              canRequestOlder: pageResult.canRequestOlder,
+              loadingMore: false,
+            },
+          },
+        };
+      }
 
       const merged = [...newMsgs, ...existing];
       const page = state.pagination[chatJid];
@@ -173,7 +210,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ...state.pagination,
           [chatJid]: {
             oldestTimestampLoaded: oldest,
-            hasMore: newMsgs.length >= 50,
+            hasMoreLocal: pageResult.hasMoreLocal,
+            canRequestOlder: pageResult.canRequestOlder,
             loadingMore: false,
           },
         },
@@ -184,7 +222,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   setSyncing: (syncing) => set({ isSyncing: syncing }),
 
-  setInitialSyncState: (state) => set({ initialSyncState: state }),
+  setInitialSyncState: (state, error = '') => set({ initialSyncState: state, initialSyncError: error }),
 
   setLoadingMore: (chatJid, loading) =>
     set((state) => ({
@@ -193,7 +231,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         [chatJid]: {
           ...state.pagination[chatJid],
           oldestTimestampLoaded: state.pagination[chatJid]?.oldestTimestampLoaded ?? 0,
-          hasMore: state.pagination[chatJid]?.hasMore ?? false,
+          hasMoreLocal: state.pagination[chatJid]?.hasMoreLocal ?? false,
+          canRequestOlder: state.pagination[chatJid]?.canRequestOlder ?? false,
           loadingMore: loading,
         },
       },
@@ -207,7 +246,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       searchQuery: '',
       isSyncing: true,
       initialSyncState: 'running',
+      initialSyncError: '',
       pagination: {},
+      syncProgressCount: 0,
     }),
 
   markChatRead: (jid) =>
@@ -215,6 +256,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
       chats: state.chats.map((c) =>
         c.jid === jid ? { ...c, unreadCount: 0 } : c
       ),
+    })),
+
+  setChatAvatar: (jid, avatar) =>
+    set((state) => ({
+      chats: state.chats.map((c) =>
+        c.jid === jid ? { ...c, avatar } : c
+      ),
+    })),
+
+  addSyncProgress: (count) =>
+    set((state) => ({
+      syncProgressCount: state.syncProgressCount + count,
     })),
 
   filteredChats: () => {

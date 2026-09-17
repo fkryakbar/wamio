@@ -4,7 +4,7 @@ import { MessageInput } from './MessageInput';
 import { MediaMessage } from './MediaMessage';
 import { VoiceNote } from './VoiceNote';
 import { Lightbox } from './Lightbox';
-import type { MessageItem } from '../types';
+import type { MessageItem, MessagePage } from '../types';
 
 function formatMessageTime(ts: number): string {
   if (!ts) return '';
@@ -55,6 +55,7 @@ function MessageBubble({ message, showSender, isGroup, onOpenLightbox }: Message
   const hasMedia = !!message.mediaType && message.mediaType !== '';
   const isVoiceNote = message.mediaType === 'audio' && message.isPtt;
   const isAudio = message.mediaType === 'audio' && !message.isPtt;
+  const receipt = message.deliveryStatus || 'sent';
 
   return (
     <div className={`message ${message.isFromMe ? 'message--sent' : 'message--received'}`}>
@@ -83,8 +84,9 @@ function MessageBubble({ message, showSender, isGroup, onOpenLightbox }: Message
         <span className="message__meta">
           <span className="message__time">{formatMessageTime(message.timestamp)}</span>
           {message.isFromMe && (
-            <svg className="message__check" width="16" height="11" viewBox="0 0 16 11">
+            <svg className={`message__check message__check--${receipt}`} width="16" height="11" viewBox="0 0 16 11" aria-label={receipt}>
               <path d="M11.071.653a.457.457 0 0 0-.304-.102.493.493 0 0 0-.381.178l-6.19 7.636-2.011-2.095a.464.464 0 0 0-.352-.153.468.468 0 0 0-.34.131.477.477 0 0 0-.014.679l2.333 2.433a.515.515 0 0 0 .349.166.516.516 0 0 0 .387-.158l6.528-8.005a.484.484 0 0 0-.005-.71z" fill="currentColor"/>
+              {receipt !== 'sent' && <path d="M15.071.653a.457.457 0 0 0-.304-.102.493.493 0 0 0-.381.178l-6.19 7.636-2.011-2.095a.464.464 0 0 0-.352-.153.468.468 0 0 0-.34.131.477.477 0 0 0-.014.679l2.333 2.433a.515.515 0 0 0 .349.166.516.516 0 0 0 .387-.158l6.528-8.005a.484.484 0 0 0-.005-.71z" fill="currentColor"/>}
             </svg>
           )}
         </span>
@@ -141,10 +143,8 @@ export function ChatView() {
     if (page) return; // already initialized
 
     import('../../wailsjs/go/whatsapp/WhatsAppService').then((mod) => {
-      mod.GetMessagesPage(activeChatJID, 20, 0).then((msgs: MessageItem[]) => {
-        if (msgs && msgs.length > 0) {
-          setInitialMessages(activeChatJID, msgs);
-        }
+      mod.GetMessagesPage(activeChatJID, 20, 0).then((pageResult: MessagePage) => {
+        setInitialMessages(activeChatJID, pageResult);
       });
     }).catch(() => {});
   }, [activeChatJID, pagination, setInitialMessages]);
@@ -161,19 +161,35 @@ export function ChatView() {
     if (el.scrollTop > 80) return;
 
     const page = pagination[activeChatJID];
-    if (!page || page.loadingMore || !page.hasMore) return;
+    if (!page || page.loadingMore) return;
+
+    const oldest = chatMessages[0];
+    if (!oldest) return;
 
     setLoadingMore(activeChatJID, true);
     import('../../wailsjs/go/whatsapp/WhatsAppService').then((mod) => {
-      mod.GetMessagesPage(activeChatJID, 50, page.oldestTimestampLoaded)
-        .then((msgs: MessageItem[]) => {
-          if (msgs && msgs.length > 0) {
-            prependMessagesPage(activeChatJID, msgs);
-          }
-        })
-        .finally(() => {
-          setLoadingMore(activeChatJID, false);
-        });
+      if (page.hasMoreLocal) {
+        mod.GetMessagesPage(activeChatJID, 50, page.oldestTimestampLoaded)
+          .then((result: MessagePage) => {
+            prependMessagesPage(activeChatJID, result);
+            if (result.messages.length === 0 && result.canRequestOlder) {
+              return mod.RequestOlderMessages(activeChatJID, oldest.id, oldest.isFromMe, oldest.timestamp, 50);
+            }
+            return undefined;
+          })
+          .finally(() => {
+            setLoadingMore(activeChatJID, false);
+          });
+      } else if (page.canRequestOlder) {
+        mod.RequestOlderMessages(activeChatJID, oldest.id, oldest.isFromMe, oldest.timestamp, 50)
+          .finally(() => {
+            // The actual page arrives through wa:history-page. Keep the guard
+            // only until the request has been accepted by the backend.
+            setLoadingMore(activeChatJID, false);
+          });
+      } else {
+        setLoadingMore(activeChatJID, false);
+      }
     }).catch(() => {
       setLoadingMore(activeChatJID, false);
     });
@@ -229,8 +245,12 @@ export function ChatView() {
     <div className="chatview">
       {/* Chat Header */}
       <div className="chatview__header">
-        <div className="chatview__header-avatar" style={{ backgroundColor: '#00a884' }}>
-          {chat.name?.[0]?.toUpperCase() || '?'}
+        <div className="chatview__header-avatar" style={{ backgroundColor: '#00a884', overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          {chat.avatar ? (
+            <img src={chat.avatar.startsWith('http') ? chat.avatar : `data:image/jpeg;base64,${chat.avatar}`} alt={chat.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+          ) : (
+            chat.name?.[0]?.toUpperCase() || '?'
+          )}
         </div>
         <div className="chatview__header-info">
           <span className="chatview__header-name">{chat.name}</span>

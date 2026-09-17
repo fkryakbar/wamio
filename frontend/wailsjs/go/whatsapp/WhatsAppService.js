@@ -38,6 +38,14 @@ export function GetMessagesPage(arg1, arg2, arg3) {
   return window['go']['whatsapp']['WhatsAppService']['GetMessagesPage'](arg1, arg2, arg3);
 }
 
+export function GetProfilePicture(arg1) {
+  return window['go']['whatsapp']['WhatsAppService']['GetProfilePicture'](arg1);
+}
+
+export function GetRecentChatsWithMessages(arg1, arg2) {
+  return window['go']['whatsapp']['WhatsAppService']['GetRecentChatsWithMessages'](arg1, arg2);
+}
+
 export function GetUserInfo() {
   return window['go']['whatsapp']['WhatsAppService']['GetUserInfo']();
 }
@@ -56,6 +64,10 @@ export function MarkChatRead(arg1) {
 
 export function OpenDocument(arg1, arg2) {
   return window['go']['whatsapp']['WhatsAppService']['OpenDocument'](arg1, arg2);
+}
+
+export function RequestOlderMessages(arg1, arg2, arg3, arg4, arg5) {
+  return window['go']['whatsapp']['WhatsAppService']['RequestOlderMessages'](arg1, arg2, arg3, arg4, arg5);
 }
 
 export function SendMessage(arg1, arg2) {

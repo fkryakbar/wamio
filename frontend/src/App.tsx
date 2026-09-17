@@ -1,24 +1,25 @@
-import { useEffect } from 'react';
+import { useEffect, type ReactNode } from 'react';
 import { LoginPage } from './pages/LoginPage';
 import { Sidebar } from './components/Sidebar';
 import { ChatView } from './components/ChatView';
 import { useAuthStore } from './stores/authStore';
 import { useChatStore } from './stores/chatStore';
-import type { ConnectionStatusEvent, MessageEvent, ChatUpdateEvent, ChatItem, NotificationEvent, InitialSyncEvent, ChatWithMessages } from './types';
+import type { ConnectionStatusEvent, MessageEvent, ChatUpdateEvent, ChatItem, NotificationEvent, InitialSyncEvent, HistoryPageEvent, MessageReceiptEvent } from './types';
 import { EventsOn } from '../wailsjs/runtime/runtime';
 
-function FullScreenLoading({ text }: { text: string }) {
+function FullScreenLoading({ text, action }: { text: string; action?: ReactNode }) {
   return (
     <div className="app-loading">
       <div className="app-loading__spinner" />
       <p className="app-loading__text">{text}</p>
+      {action}
     </div>
   );
 }
 
 function App() {
   const { connectionState, setConnectionState, userInfo } = useAuthStore();
-  const { setChats, updateChat, addMessage, setSyncing, initialSyncState, setInitialSyncState, setInitialMessages } = useChatStore();
+  const { setChats, updateChat, addMessage, updateMessageReceipts, setSyncing, initialSyncState, initialSyncError, setInitialSyncState, prependMessagesPage } = useChatStore();
 
   // Global connection event listener
   useEffect(() => {
@@ -32,24 +33,42 @@ function App() {
   // Initial sync lifecycle listener (always subscribed)
   useEffect(() => {
     const cancelInitSync = EventsOn('wa:initial-sync', (data: InitialSyncEvent) => {
-      setInitialSyncState(data.state);
+      setInitialSyncState(data.state, data.message);
     });
     return () => { cancelInitSync(); };
   }, [setInitialSyncState]);
 
-  // Preloaded messages for recent chats (7 days)
+  // History sync progress listener
   useEffect(() => {
-    const cancelRecent = EventsOn('wa:recent-chat-messages', (data: { entries: ChatWithMessages[] }) => {
-      if (data?.entries) {
-        for (const entry of data.entries) {
-          if (entry.messages && entry.messages.length > 0) {
-            setInitialMessages(entry.chat.jid, entry.messages);
-          }
-        }
+    let timer: any;
+    const cancelProgress = EventsOn('wa:history-sync-progress', (data: { count: number }) => {
+      useChatStore.getState().addSyncProgress(data.count);
+      useChatStore.getState().setSyncing(true); // force syncing banner to show
+
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        useChatStore.getState().setSyncing(false); // hide sync banner after 5 seconds of inactivity
+      }, 5000);
+    });
+    return () => {
+      cancelProgress();
+      clearTimeout(timer);
+    };
+  }, []);
+
+  // Older history arrives asynchronously after a scroll-triggered request.
+  useEffect(() => {
+    const cancelHistoryPage = EventsOn('wa:history-page', (data: HistoryPageEvent) => {
+      if (data?.chatJid) {
+        prependMessagesPage(data.chatJid, {
+          messages: data.messages || [],
+          hasMoreLocal: false,
+          canRequestOlder: data.canRequestOlder,
+        });
       }
     });
-    return () => { cancelRecent(); };
-  }, [setInitialMessages]);
+    return () => { cancelHistoryPage(); };
+  }, [prependMessagesPage]);
 
   // Chat & message event listeners (only when connected)
   useEffect(() => {
@@ -69,7 +88,6 @@ function App() {
       if (chats && chats.length > 0) {
         setChats(chats);
       }
-      setSyncing(false);
     });
 
     // Listen for individual chat updates
@@ -80,6 +98,10 @@ function App() {
     // Listen for new messages
     const cancelMsg = EventsOn('wa:message', (data: MessageEvent) => {
       addMessage(data.chatJid, data.message);
+    });
+
+    const cancelReceipt = EventsOn('wa:message-receipt', (data: MessageReceiptEvent) => {
+      updateMessageReceipts(data.chatJid, data.messageIds, data.deliveryStatus);
     });
 
     // Listen for notifications (incoming messages from others)
@@ -105,9 +127,10 @@ function App() {
       cancelSync();
       cancelChatUpdate();
       cancelMsg();
+      cancelReceipt();
       cancelNotif();
     };
-  }, [connectionState, setChats, updateChat, addMessage, setSyncing]);
+  }, [connectionState, setChats, updateChat, addMessage, updateMessageReceipts, setSyncing]);
 
   // Show login page if not connected
   if (connectionState !== 'connected') {
@@ -116,6 +139,14 @@ function App() {
 
   // Gate: block chat UI until initial sync completes
   if (initialSyncState !== 'done') {
+    if (initialSyncState === 'failed') {
+      return <FullScreenLoading
+        text={initialSyncError || 'Sinkronisasi gagal. Tautkan ulang perangkat ini.'}
+        action={<button className="login-button" onClick={() => {
+          import('../wailsjs/go/whatsapp/WhatsAppService').then((mod) => mod.Logout());
+        }}>Tautkan ulang</button>}
+      />;
+    }
     return <FullScreenLoading text="Menyinkronkan pesan..." />;
   }
 

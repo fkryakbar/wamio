@@ -20,7 +20,11 @@ export function GetConnectionState():Promise<whatsapp.ConnectionState>;
 
 export function GetMessages(arg1:string,arg2:number):Promise<Array<whatsapp.MessageItem>>;
 
-export function GetMessagesPage(arg1:string,arg2:number,arg3:number):Promise<Array<whatsapp.MessageItem>>;
+export function GetMessagesPage(arg1:string,arg2:number,arg3:number):Promise<whatsapp.MessagePage>;
+
+export function GetProfilePicture(arg1:string):Promise<string>;
+
+export function GetRecentChatsWithMessages(arg1:number,arg2:number):Promise<Array<whatsapp.ChatWithMessages>>;
 
 export function GetUserInfo():Promise<whatsapp.UserInfo>;
 
@@ -31,6 +35,8 @@ export function Logout():Promise<void>;
 export function MarkChatRead(arg1:string):Promise<void>;
 
 export function OpenDocument(arg1:string,arg2:string):Promise<void>;
+
+export function RequestOlderMessages(arg1:string,arg2:string,arg3:boolean,arg4:number,arg5:number):Promise<void>;
 
 export function SendMessage(arg1:string,arg2:string):Promise<void>;
 

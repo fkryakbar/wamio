@@ -2,6 +2,8 @@ package whatsapp
 
 import (
 	"testing"
+
+	"go.mau.fi/whatsmeow/types"
 )
 
 func TestNewWhatsAppService(t *testing.T) {
@@ -98,13 +100,13 @@ func TestSetState(t *testing.T) {
 
 func TestGetMessagesPage_DefaultLimit(t *testing.T) {
 	svc := NewWhatsAppService()
-	msgs := svc.GetMessagesPage("chat@jid", 0, 12345)
-	if msgs == nil {
-		t.Fatal("expected non-nil slice")
+	page := svc.GetMessagesPage("chat@jid", 0, 12345)
+	if page.Messages == nil {
+		t.Fatal("expected non-nil message slice")
 	}
 	// no chatStore => empty result
-	if len(msgs) != 0 {
-		t.Errorf("expected empty slice without chatStore, got %d", len(msgs))
+	if len(page.Messages) != 0 {
+		t.Errorf("expected empty slice without chatStore, got %d", len(page.Messages))
 	}
 }
 
@@ -117,9 +119,9 @@ func TestGetMessagesPage_ClampsLimit(t *testing.T) {
 
 func TestGetMessagesPage_NoCursor(t *testing.T) {
 	svc := NewWhatsAppService()
-	msgs := svc.GetMessagesPage("chat@jid", 10, 0)
-	if msgs == nil {
-		t.Fatal("expected non-nil slice")
+	page := svc.GetMessagesPage("chat@jid", 10, 0)
+	if page.Messages == nil {
+		t.Fatal("expected non-nil message slice")
 	}
 }
 
@@ -139,5 +141,34 @@ func TestConnectionStateConstants(t *testing.T) {
 	}
 	if StateLoggedOut != "logged_out" {
 		t.Error("StateLoggedOut value mismatch")
+	}
+}
+
+func TestPreviewIsNewerRejectsLateOldHistoryChunk(t *testing.T) {
+	chat := &ChatItem{LastMessageTime: 1000, LastMessageOrder: 20, LastMessageID: "new"}
+	if previewIsNewer(1000, 10, "old", chat) {
+		t.Fatal("an older history message in the same conversation timestamp must not replace preview")
+	}
+	if !previewIsNewer(1000, 21, "newer", chat) {
+		t.Fatal("a newer message order should replace preview")
+	}
+}
+
+func TestChatFilterExcludesStatusAndChannels(t *testing.T) {
+	svc := NewWhatsAppService()
+	if !svc.isExcludedChat(types.StatusBroadcastJID) {
+		t.Fatal("status broadcast must not become a chat")
+	}
+	if !svc.isExcludedChat(types.NewJID("123", types.NewsletterServer)) {
+		t.Fatal("newsletter must not become a chat")
+	}
+}
+
+func TestPreviewDistinguishesOwnMessage(t *testing.T) {
+	if got := previewForMessage(MessageItem{Content: "halo", IsFromMe: true}, false); got != "Anda: halo" {
+		t.Fatalf("own preview = %q", got)
+	}
+	if got := previewForMessage(MessageItem{Content: "halo", SenderName: "Budi"}, true); got != "Budi: halo" {
+		t.Fatalf("group preview = %q", got)
 	}
 }

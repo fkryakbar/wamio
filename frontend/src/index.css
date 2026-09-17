@@ -923,6 +923,11 @@ body {
   opacity: 0.7;
 }
 
+.message__check--read {
+  color: #53bdeb;
+  opacity: 1;
+}
+
 /* ================================================
    Message Input
    ================================================ */
@@ -1292,4 +1297,34 @@ body {
 .app-loading__text {
   color: var(--wa-text-secondary);
   font-size: 14px;
+}
+
+/* Custom Sticker Styles */
+.media-message--sticker {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  max-width: 150px !important;
+  padding: 0 !important;
+}
+.media-message--sticker .media-message__img {
+  border-radius: 0 !important;
+  cursor: default !important;
+  background: transparent !important;
+}
+.message__bubble--media:has(.media-message--sticker) {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+}
+.message__bubble--media:has(.media-message--sticker) .message__meta {
+  background: rgba(0, 0, 0, 0.4) !important;
+  border-radius: 10px !important;
+  padding: 2px 6px !important;
+  position: absolute !important;
+  bottom: 4px !important;
+  right: 4px !important;
+  display: flex !important;
+  align-items: center !important;
 }

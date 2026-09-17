@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, useEffect } from 'react';
 import type { ChatItem } from '../types';
 import { useChatStore } from '../stores/chatStore';
 import { useAuthStore } from '../stores/authStore';
@@ -59,6 +59,24 @@ interface ChatListItemProps {
 function ChatListItem({ chat, isActive, onClick }: ChatListItemProps) {
   const color = useMemo(() => getAvatarColor(chat.name), [chat.name]);
   const initials = useMemo(() => getInitials(chat.name), [chat.name]);
+  const { setChatAvatar } = useChatStore();
+
+  // Asynchronously fetch profile pictures
+  useEffect(() => {
+    if (chat.avatar) return;
+
+    import('../../wailsjs/go/whatsapp/WhatsAppService')
+      .then((mod) => {
+        mod.GetProfilePicture(chat.jid)
+          .then((url: string) => {
+            if (url) {
+              setChatAvatar(chat.jid, url);
+            }
+          })
+          .catch(() => {});
+      })
+      .catch(() => {});
+  }, [chat.jid, chat.avatar, setChatAvatar]);
 
   return (
     <div
@@ -70,7 +88,7 @@ function ChatListItem({ chat, isActive, onClick }: ChatListItemProps) {
       {/* Avatar */}
       <div className="chat-item__avatar" style={{ backgroundColor: color }}>
         {chat.avatar ? (
-          <img src={`data:image/jpeg;base64,${chat.avatar}`} alt={chat.name} />
+          <img src={chat.avatar.startsWith('http') ? chat.avatar : `data:image/jpeg;base64,${chat.avatar}`} alt={chat.name} />
         ) : (
           <span>{initials}</span>
         )}
@@ -105,7 +123,7 @@ function ChatListItem({ chat, isActive, onClick }: ChatListItemProps) {
 }
 
 export function Sidebar() {
-  const { activeChatJID, setActiveChat, filteredChats, searchQuery, setSearchQuery, markChatRead, isSyncing } = useChatStore();
+  const { activeChatJID, setActiveChat, filteredChats, searchQuery, setSearchQuery, markChatRead, isSyncing, syncProgressCount } = useChatStore();
   const { userInfo } = useAuthStore();
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const chats = filteredChats();
@@ -174,7 +192,7 @@ export function Sidebar() {
       {isSyncing && (
         <div className="sidebar__sync-banner">
           <div className="spinner spinner--sm" />
-          <span>Menyinkronkan chat...</span>
+          <span>Menyinkronkan chat ({syncProgressCount} chat)...</span>
         </div>
       )}
 

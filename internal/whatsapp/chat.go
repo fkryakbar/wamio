@@ -9,6 +9,10 @@ type ChatItem struct {
 	UnreadCount     int    `json:"unreadCount"`
 	IsGroup         bool   `json:"isGroup"`
 	Avatar          string `json:"avatar,omitempty"` // Base64 encoded
+	// These values make same-second history chunks deterministic. They stay
+	// internal so the frontend continues to receive the public ChatItem shape.
+	LastMessageID    string `json:"-"`
+	LastMessageOrder uint64 `json:"-"`
 }
 
 // MessageItem represents a single message in a chat conversation
@@ -27,6 +31,8 @@ type MessageItem struct {
 	FileName      string `json:"fileName,omitempty"`      // Original filename (documents)
 	Mimetype      string `json:"mimetype,omitempty"`      // MIME type
 	IsPTT         bool   `json:"isPtt,omitempty"`         // Push-to-talk (voice note)
+	// DeliveryStatus applies only to outgoing messages: sent, delivered, read.
+	DeliveryStatus string `json:"deliveryStatus,omitempty"`
 }
 
 // MessageEvent is emitted to the frontend when a new message arrives
@@ -40,9 +46,32 @@ type ChatUpdateEvent struct {
 	Chat ChatItem `json:"chat"`
 }
 
+type MessageReceiptEvent struct {
+	ChatJID        string   `json:"chatJid"`
+	MessageIDs     []string `json:"messageIds"`
+	DeliveryStatus string   `json:"deliveryStatus"`
+}
+
 // InitialSyncEvent is emitted to signal initial sync lifecycle state
 type InitialSyncEvent struct {
-	State string `json:"state"` // "running" | "done"
+	State   string `json:"state"` // "running" | "done" | "failed"
+	Message string `json:"message,omitempty"`
+}
+
+// MessagePage is a local page plus whether older history may be requested
+// from the primary phone once the local cache is exhausted.
+type MessagePage struct {
+	Messages        []MessageItem `json:"messages"`
+	HasMoreLocal    bool          `json:"hasMoreLocal"`
+	CanRequestOlder bool          `json:"canRequestOlder"`
+}
+
+// HistoryPageEvent delivers asynchronous ON_DEMAND history to the frontend.
+type HistoryPageEvent struct {
+	ChatJID         string        `json:"chatJid"`
+	Messages        []MessageItem `json:"messages"`
+	CanRequestOlder bool          `json:"canRequestOlder"`
+	Error           string        `json:"error,omitempty"`
 }
 
 // NotificationEvent is emitted for native OS notifications

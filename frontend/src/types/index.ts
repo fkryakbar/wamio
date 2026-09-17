@@ -50,6 +50,7 @@ export interface MessageItem {
   fileName?: string;
   mimetype?: string;
   isPtt?: boolean;
+  deliveryStatus?: string;
 }
 
 export interface MessageEvent {
@@ -61,6 +62,12 @@ export interface ChatUpdateEvent {
   chat: ChatItem;
 }
 
+export interface MessageReceiptEvent {
+  chatJid: string;
+  messageIds: string[];
+  deliveryStatus: 'delivered' | 'read';
+}
+
 export interface NotificationEvent {
   chatJid: string;
   chatName: string;
@@ -70,7 +77,21 @@ export interface NotificationEvent {
 }
 
 export interface InitialSyncEvent {
-  state: 'running' | 'done';
+  state: 'running' | 'done' | 'failed';
+  message?: string;
+}
+
+export interface MessagePage {
+  messages: MessageItem[];
+  hasMoreLocal: boolean;
+  canRequestOlder: boolean;
+}
+
+export interface HistoryPageEvent {
+  chatJid: string;
+  messages: MessageItem[];
+  canRequestOlder: boolean;
+  error?: string;
 }
 
 export interface ChatWithMessages {

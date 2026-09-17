@@ -100,3 +100,43 @@ func TestChatStore_GetMessagesBefore(t *testing.T) {
 		}
 	})
 }
+
+func TestChatStorePreviewKeepsNewestMessageOrder(t *testing.T) {
+	cs := setupTestChatStore(t)
+	chat := ChatRow{JID: "test@s.whatsapp.net", LastMessage: "new", LastMessageTime: 100, LastMessageID: "new", LastMessageOrder: 20}
+	if err := cs.UpsertChat(chat); err != nil {
+		t.Fatal(err)
+	}
+	chat.LastMessage, chat.LastMessageID, chat.LastMessageOrder = "old", "old", 10
+	if err := cs.UpsertChat(chat); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := cs.GetAllChats()
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("GetAllChats: rows=%d err=%v", len(rows), err)
+	}
+	if rows[0].LastMessage != "new" || rows[0].LastMessageOrder != 20 {
+		t.Fatalf("late history overwrote preview: %#v", rows[0])
+	}
+}
+
+func TestChatStoreReceiptDoesNotDowngradeRead(t *testing.T) {
+	cs := setupTestChatStore(t)
+	chatJID := "test@s.whatsapp.net"
+	if err := cs.UpsertMessage(MessageRow{ID: "outgoing", ChatJID: chatJID, IsFromMe: true, DeliveryStatus: "sent"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cs.UpdateMessageReceipt(chatJID, []string{"outgoing"}, "read"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cs.UpdateMessageReceipt(chatJID, []string{"outgoing"}, "delivered"); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := cs.GetMessages(chatJID, 1)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("GetMessages: rows=%d err=%v", len(rows), err)
+	}
+	if rows[0].DeliveryStatus != "read" || !rows[0].IsRead {
+		t.Fatalf("receipt regressed: %#v", rows[0])
+	}
+}

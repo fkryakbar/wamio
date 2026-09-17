@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import type { MessageItem } from '../types';
 
 interface MediaMessageProps {
@@ -37,15 +37,23 @@ export function MediaMessage({ message, onOpenLightbox }: MediaMessageProps) {
     return 'data:image/jpeg;base64,';
   };
 
+  // Automatically load stickers on render
+  useEffect(() => {
+    if (message.mediaType === 'sticker') {
+      loadMedia();
+    }
+  }, [message.mediaType, loadMedia]);
+
   if (message.mediaType === 'image' || message.mediaType === 'sticker') {
+    const isSticker = message.mediaType === 'sticker';
     return (
-      <div className="media-message media-message--image">
+      <div className={`media-message media-message--image ${isSticker ? 'media-message--sticker' : ''}`}>
         {mediaData ? (
           <img
             src={`${getMimePrefix()}${mediaData}`}
             alt={message.content}
             className="media-message__img"
-            onClick={() => onOpenLightbox(`${getMimePrefix()}${mediaData}`)}
+            onClick={() => !isSticker && onOpenLightbox(`${getMimePrefix()}${mediaData}`)}
           />
         ) : (
           <div className="media-message__placeholder" onClick={loadMedia}>
@@ -63,7 +71,7 @@ export function MediaMessage({ message, onOpenLightbox }: MediaMessageProps) {
             )}
           </div>
         )}
-        {message.content && !message.content.startsWith('📷') && (
+        {message.content && !message.content.startsWith('📷') && !isSticker && (
           <span className="media-message__caption">{message.content}</span>
         )}
       </div>
