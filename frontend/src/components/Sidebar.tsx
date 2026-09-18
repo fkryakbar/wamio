@@ -1,7 +1,7 @@
-import { useMemo, useState, useEffect } from "react";
+import { useMemo, useState, useEffect, useRef } from "react";
+import { BellOff, Pin, Search, Users } from "lucide-react";
 import type { ChatItem } from "../types";
 import { useChatStore } from "../stores/chatStore";
-import { useAuthStore } from "../stores/authStore";
 
 function getInitials(name: string): string {
   return name
@@ -73,6 +73,12 @@ interface ChatListItemProps {
 
 function PreviewReceipt({ status }: { status: ChatItem["lastMessageStatus"] }) {
   const receipt = status || "sent";
+	if (receipt === "pending") {
+		return <span className="chat-item__pending" aria-label="Mengirim" title="Mengirim" />;
+	}
+	if (receipt === "failed") {
+		return <span className="chat-item__failed" aria-label="Gagal dikirim" title="Gagal dikirim">!</span>;
+	}
   return (
     <svg
       className={`chat-item__receipt chat-item__receipt--${receipt}`}
@@ -98,14 +104,36 @@ function PreviewReceipt({ status }: { status: ChatItem["lastMessageStatus"] }) {
 function ChatListItem({ chat, isActive, onClick }: ChatListItemProps) {
   const color = useMemo(() => getAvatarColor(chat.name), [chat.name]);
   const initials = useMemo(() => getInitials(chat.name), [chat.name]);
+  const itemRef = useRef<HTMLDivElement | null>(null);
+  const [nearViewport, setNearViewport] = useState(false);
   const { setChatAvatar } = useChatStore();
   const typing = useChatStore(
     (state) => state.presence[chat.jid]?.typing ?? false,
   );
 
-  // Asynchronously fetch profile pictures
+  // Do not request an avatar for every chat as soon as a fresh sync renders
+  // the sidebar. Fetch only rows that are about to be visible.
   useEffect(() => {
-    if (chat.avatar) return;
+    const element = itemRef.current;
+    if (!element) return;
+    if (!("IntersectionObserver" in window)) {
+      setNearViewport(true);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return;
+        setNearViewport(true);
+        observer.disconnect();
+      },
+      { rootMargin: "200px 0px" },
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (chat.avatar || !nearViewport) return;
 
     import("../../wailsjs/go/whatsapp/WhatsAppService")
       .then((mod) => {
@@ -119,9 +147,10 @@ function ChatListItem({ chat, isActive, onClick }: ChatListItemProps) {
           .catch(() => {});
       })
       .catch(() => {});
-  }, [chat.jid, chat.avatar, setChatAvatar]);
+  }, [chat.jid, chat.avatar, nearViewport, setChatAvatar]);
   return (
     <div
+      ref={itemRef}
       className={`chat-item ${isActive ? "chat-item--active" : ""}`}
       onClick={onClick}
       role="button"
@@ -142,11 +171,7 @@ function ChatListItem({ chat, isActive, onClick }: ChatListItemProps) {
           <span>{initials}</span>
         )}
         {chat.isGroup && (
-          <div className="chat-item__group-icon">
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="white">
-              <path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z" />
-            </svg>
-          </div>
+          <div className="chat-item__group-icon"><Users size={11} strokeWidth={2.5} /></div>
         )}
       </div>
 
@@ -158,8 +183,8 @@ function ChatListItem({ chat, isActive, onClick }: ChatListItemProps) {
             {chat.isArchived && (
               <span className="chat-item__archive-label">Diarsipkan</span>
             )}
-							{chat.isPinned && <span title="Disematkan" aria-label="Disematkan">📌</span>}
-							{chat.isMuted && <span title="Dibisukan" aria-label="Dibisukan">🔕</span>}
+            {chat.isPinned && <Pin className="chat-item__status-icon" size={14} aria-label="Disematkan" />}
+            {chat.isMuted && <BellOff className="chat-item__status-icon" size={14} aria-label="Dibisukan" />}
           </div>
           <span
             className={`chat-item__time ${chat.unreadCount > 0 ? "chat-item__time--unread" : ""}`}
@@ -206,24 +231,7 @@ export function Sidebar() {
     initialSyncState,
     initialSyncError,
   } = useChatStore();
-  const { userInfo } = useAuthStore();
-  const [isLoggingOut, setIsLoggingOut] = useState(false);
   const chats = filteredChats();
-
-  const handleLogout = async () => {
-    if (isLoggingOut) return;
-    setIsLoggingOut(true);
-    try {
-      const mod = await import("../../wailsjs/go/whatsapp/WhatsAppService");
-      await mod.Logout();
-      useAuthStore.getState().reset();
-      useChatStore.getState().reset();
-    } catch (err) {
-      console.error("Logout failed:", err);
-    } finally {
-      setIsLoggingOut(false);
-    }
-  };
 
   const handleChatClick = (jid: string) => {
     setActiveChat(jid);
@@ -233,38 +241,13 @@ export function Sidebar() {
     <div className="sidebar">
       {/* Header */}
       <div className="sidebar__header">
-        <div className="sidebar__user">
-          <div
-            className="sidebar__user-avatar"
-            style={{ backgroundColor: "#00a884" }}
-          >
-            {userInfo?.pushName?.[0]?.toUpperCase() || "W"}
-          </div>
-          <span className="sidebar__user-name">
-            {userInfo?.pushName || "Wamio"}
-          </span>
-        </div>
-        <button
-          type="button"
-          onClick={handleLogout}
-          disabled={isLoggingOut}
-          className="sidebar__logout-btn"
-        >
-          {isLoggingOut ? "Logging out..." : "Logout"}
-        </button>
+        <span className="sidebar__app-name">Wamio</span>
       </div>
 
       {/* Search */}
       <div className="sidebar__search">
         <div className="sidebar__search-input">
-          <svg
-            width="16"
-            height="16"
-            viewBox="0 0 24 24"
-            fill="var(--text-tertiary)"
-          >
-            <path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z" />
-          </svg>
+          <Search size={18} />
           <input
             type="text"
             placeholder="Cari atau mulai chat baru"

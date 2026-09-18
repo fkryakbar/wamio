@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { X } from 'lucide-react';
 import type { ChatItem, ForwardResult } from '../types';
 
 interface ForwardDialogProps {
@@ -39,7 +40,7 @@ export function ForwardDialog({ sourceChatJID, messageIDs, chats, onClose }: For
   return (
     <div className="forward-dialog__backdrop" role="presentation" onMouseDown={onClose}>
       <section className="forward-dialog" role="dialog" aria-modal="true" aria-label="Teruskan pesan" onMouseDown={(event) => event.stopPropagation()}>
-        <header><h2>Teruskan pesan ke</h2><button type="button" onClick={onClose} aria-label="Tutup">×</button></header>
+        <header><h2>Teruskan pesan ke</h2><button type="button" onClick={onClose} aria-label="Tutup"><X size={22} /></button></header>
         <input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Cari nama chat" />
         <div className="forward-dialog__list">
           {filtered.map((chat) => (

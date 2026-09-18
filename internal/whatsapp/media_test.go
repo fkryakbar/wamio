@@ -26,3 +26,19 @@ func TestMediaCacheReadsDownloadedImageWithoutRawMessage(t *testing.T) {
 		t.Fatalf("unexpected media payload: %q", actual)
 	}
 }
+
+func TestMediaCacheStoresOutgoingMedia(t *testing.T) {
+	cache := NewMediaCache(t.TempDir())
+	source := filepath.Join(t.TempDir(), "source.pdf")
+	payload := []byte("outgoing document")
+	if err := os.WriteFile(source, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cache.StoreOutgoingMedia("123@s.whatsapp.net", "outgoing", "application/pdf", "document", "report.pdf", source); err != nil {
+		t.Fatal(err)
+	}
+	actual, found, err := cache.ReadCachedMedia("123@s.whatsapp.net", "outgoing", "application/pdf", "document", "report.pdf")
+	if err != nil || !found || actual != base64.StdEncoding.EncodeToString(payload) {
+		t.Fatalf("outgoing cache found=%v err=%v data=%q", found, err, actual)
+	}
+}

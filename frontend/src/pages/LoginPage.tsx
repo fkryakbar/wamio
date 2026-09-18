@@ -1,101 +1,39 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useCallback } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import { useAuthStore } from '../stores/authStore';
-import type { QRCodeEvent, ConnectionStatusEvent } from '../types';
-import { EventsOn } from '../../wailsjs/runtime/runtime';
 
-export function LoginPage() {
+interface LoginPageProps {
+  mode: 'initial' | 'add';
+  onBeginPairing: (label: string) => Promise<void>;
+  onCancel?: () => void;
+}
+
+export function LoginPage({ mode, onBeginPairing, onCancel }: LoginPageProps) {
   const {
     connectionState,
     qrCode,
     accountId,
     errorMessage,
     setAccountId,
-    setQRCode,
-    setConnectionState,
-    setUserInfo,
     setError,
   } = useAuthStore();
 
   const [isConnecting, setIsConnecting] = useState(false);
-  const bindingsRef = useRef<{
-    Connect: (id: string) => Promise<void>;
-		RestoreLastSession: () => Promise<{ attempted: boolean }>;
-    IsLoggedIn: () => Promise<boolean>;
-    GetUserInfo: () => Promise<any>;
-  } | null>(null);
-
-  // Load Go bindings dynamically
-  useEffect(() => {
-    async function loadBindings() {
-      try {
-        // Wails generates bindings at this path based on package name
-        const mod = await import('../../wailsjs/go/whatsapp/WhatsAppService');
-        bindingsRef.current = {
-          Connect: mod.Connect,
-			RestoreLastSession: mod.RestoreLastSession,
-          IsLoggedIn: mod.IsLoggedIn,
-          GetUserInfo: mod.GetUserInfo,
-        };
-
-        // Restore the most recently successful linked session automatically.
-			setIsConnecting(true);
-			try {
-				const restored = await mod.RestoreLastSession();
-				if (!restored.attempted) setIsConnecting(false);
-			} catch {
-				setIsConnecting(false);
-				setConnectionState('disconnected');
-			}
-      } catch (err) {
-        console.warn('Go bindings not available yet (normal during first build):', err);
-      }
-    }
-
-    loadBindings();
-  }, [setConnectionState, setUserInfo]);
-
-  // Listen for WhatsApp events from Go backend
-  useEffect(() => {
-    const cancelQR = EventsOn('wa:qr-code', (data: QRCodeEvent) => {
-      setQRCode(data);
-      setIsConnecting(false);
-    });
-
-    const cancelConn = EventsOn('wa:connection', (data: ConnectionStatusEvent) => {
-      setConnectionState(data.state);
-		if (data.state === 'disconnected' || data.state === 'logged_out') setIsConnecting(false);
-      if (data.state === 'connected' && bindingsRef.current) {
-        bindingsRef.current.GetUserInfo()
-          .then((info) => { if (info) setUserInfo(info); })
-          .catch(console.error);
-      }
-    });
-
-    return () => {
-      cancelQR();
-      cancelConn();
-    };
-  }, [setQRCode, setConnectionState, setUserInfo]);
 
   const handleConnect = useCallback(async () => {
     if (!accountId.trim()) {
       setError('Masukkan nama akun terlebih dahulu');
       return;
     }
-    if (!bindingsRef.current) {
-      setError('Aplikasi belum siap, tunggu sebentar...');
-      return;
-    }
     setIsConnecting(true);
     setError(null);
     try {
-      await bindingsRef.current.Connect(accountId.trim());
+      await onBeginPairing(accountId.trim());
     } catch (err: any) {
-      setError(err?.message || 'Gagal terhubung ke WhatsApp');
+      setError(err?.message || 'Gagal memulai penambahan akun');
       setIsConnecting(false);
     }
-  }, [accountId, setError]);
+  }, [accountId, onBeginPairing, setError]);
 
   const handleRetry = useCallback(() => {
     setError(null);
@@ -166,18 +104,18 @@ export function LoginPage() {
         <p className="login-card__subtitle">
           Kirim dan terima pesan WhatsApp langsung dari desktop Anda.
           <br />
-          Scan QR code untuk menghubungkan akun.
+          {mode === 'add' ? 'Masukkan nama akun, lalu scan QR code untuk menambahkannya.' : 'Masukkan nama akun, lalu scan QR code untuk menghubungkannya.'}
         </p>
 
         {/* Account ID Input */}
         <div className="login-card__account-input">
-          <label htmlFor="account-id">Nama Akun (untuk multi-akun)</label>
+          <label htmlFor="account-id">Nama akun</label>
           <input
             id="account-id"
             type="text"
             value={accountId}
             onChange={(e) => setAccountId(e.target.value)}
-            placeholder="default"
+            placeholder="Contoh: Kantor"
             disabled={connectionState === 'qr_ready' || connectionState === 'connected'}
           />
         </div>
@@ -221,6 +159,12 @@ export function LoginPage() {
             ) : (
               'Hubungkan WhatsApp'
             )}
+          </button>
+        )}
+
+        {mode === 'add' && onCancel && (
+          <button type="button" className="login-card__retry-btn" onClick={onCancel} disabled={isConnecting || connectionState === 'connecting'}>
+            Kembali ke akun sebelumnya
           </button>
         )}
 

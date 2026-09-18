@@ -4,6 +4,10 @@ import {whatsapp} from '../models';
 import {whatsmeow} from '../models';
 import {context} from '../models';
 
+export function BeginAddAccount(arg1:string):Promise<void>;
+
+export function CancelAddAccount():Promise<void>;
+
 export function CheckRegistered(arg1:string):Promise<boolean>;
 
 export function Connect(arg1:string):Promise<void>;
@@ -20,7 +24,11 @@ export function DownloadMedia(arg1:string,arg2:string):Promise<string>;
 
 export function ForwardMessages(arg1:string,arg2:Array<string>,arg3:Array<string>):Promise<Array<whatsapp.ForwardResult>>;
 
+export function GetAccounts():Promise<Array<whatsapp.AccountInfo>>;
+
 export function GetCachedMedia(arg1:string,arg2:string):Promise<string>;
+
+export function GetCallLog():Promise<Array<whatsapp.CallLogEntry>>;
 
 export function GetChatLists():Promise<Array<whatsapp.ChatList>>;
 
@@ -34,6 +42,8 @@ export function GetConnectionState():Promise<whatsapp.ConnectionState>;
 
 export function GetDocumentState(arg1:string,arg2:string):Promise<whatsapp.DocumentState>;
 
+export function GetDraftPreview(arg1:string):Promise<string>;
+
 export function GetMessages(arg1:string,arg2:number):Promise<Array<whatsapp.MessageItem>>;
 
 export function GetMessagesAround(arg1:string,arg2:string,arg3:number):Promise<whatsapp.MessagePage>;
@@ -43,6 +53,10 @@ export function GetMessagesPage(arg1:string,arg2:number,arg3:number):Promise<wha
 export function GetProfilePicture(arg1:string):Promise<string>;
 
 export function GetRecentChatsWithMessages(arg1:number,arg2:number):Promise<Array<whatsapp.ChatWithMessages>>;
+
+export function GetRecentStickers():Promise<Array<whatsapp.StickerItem>>;
+
+export function GetStickerPreview(arg1:string):Promise<string>;
 
 export function GetUserInfo():Promise<whatsapp.UserInfo>;
 
@@ -66,8 +80,18 @@ export function RestoreLastSession():Promise<whatsapp.RestoreSessionResult>;
 
 export function SaveDocumentAs(arg1:string,arg2:string):Promise<boolean>;
 
-export function SendMessage(arg1:string,arg2:string):Promise<void>;
+export function SendAttachment(arg1:string,arg2:string,arg3:string,arg4:string):Promise<void>;
 
-export function SendReply(arg1:string,arg2:string,arg3:whatsapp.MessageReference):Promise<void>;
+export function SendMessage(arg1:string,arg2:string,arg3:string):Promise<void>;
+
+export function SendRecentSticker(arg1:string,arg2:string,arg3:string):Promise<void>;
+
+export function SendReply(arg1:string,arg2:string,arg3:whatsapp.MessageReference,arg4:string):Promise<void>;
 
 export function SetContext(arg1:context.Context):Promise<void>;
+
+export function StageAttachments(arg1:Array<string>,arg2:string):Promise<Array<whatsapp.AttachmentDraft>>;
+
+export function StageDataURL(arg1:string,arg2:string,arg3:string,arg4:boolean):Promise<whatsapp.AttachmentDraft>;
+
+export function SwitchAccount(arg1:string):Promise<void>;

@@ -24,6 +24,13 @@ export interface UserInfo {
   platform: string;
 }
 
+export interface AccountInfo {
+  id: string;
+  label: string;
+  userInfo: UserInfo;
+  isActive: boolean;
+}
+
 // Chat & Message types
 export interface ChatItem {
   jid: string;
@@ -59,6 +66,11 @@ export interface MessageItem {
   thumbnail?: string;
   isPtt?: boolean;
   deliveryStatus?: string;
+  clientRequestId?: string;
+  // These fields never come from persisted WhatsApp history; they exist only
+  // while the desktop reconciles a local optimistic operation.
+  localState?: 'pending' | 'failed';
+  draftId?: string;
   replyTo?: MessageReference;
   isForwarded?: boolean;
 	isDeleted?: boolean;
@@ -69,7 +81,26 @@ export interface MessageItem {
   reactions?: MessageReaction[];
 }
 
+export interface AttachmentDraft {
+  id: string;
+  kind: 'image' | 'video' | 'audio' | 'document';
+  fileName: string;
+  mimetype: string;
+  fileSize: number;
+  isPtt?: boolean;
+}
+
+export interface StickerItem {
+  id: string;
+  mimetype: string;
+  width: number;
+  height: number;
+  lastUsedAt: number;
+  available: boolean;
+}
+
 export interface CallInfo { callId: string; outcome: string; duration?: number; isVideo: boolean; isIncoming: boolean; }
+export interface CallLogEntry { chatJid: string; chatName: string; timestamp: number; outcome: string; duration?: number; isVideo: boolean; isIncoming: boolean; }
 export interface ChatList { id: string; name: string; type: string; order: number; isActive: boolean; }
 export interface DocumentState { downloaded: boolean; fileName: string; fileSize: number; }
 export interface RestoreSessionResult { attempted: boolean; accountId?: string; }

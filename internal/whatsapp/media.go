@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -79,6 +80,14 @@ func (mc *MediaCache) GetCachedPath(chatJID, messageID, ext string) string {
 
 // CachedMediaPath returns a durable cache path without reading the file.
 func (mc *MediaCache) CachedMediaPath(chatJID, messageID, mimetype, mediaType, fileName string) string {
+	path := mc.mediaPath(chatJID, messageID, mimetype, mediaType, fileName)
+	if _, err := os.Stat(path); err == nil {
+		return path
+	}
+	return ""
+}
+
+func (mc *MediaCache) mediaPath(chatJID, messageID, mimetype, mediaType, fileName string) string {
 	ext := getExtFromMime(mimetype, ".bin")
 	switch mediaType {
 	case "image":
@@ -95,7 +104,34 @@ func (mc *MediaCache) CachedMediaPath(chatJID, messageID, mimetype, mediaType, f
 			ext = candidate
 		}
 	}
-	return mc.GetCachedPath(chatJID, messageID, ext)
+	return filepath.Join(mc.getMediaDir(chatJID), messageID+ext)
+}
+
+// StoreOutgoingMedia persists an outbound file before its staging copy is
+// released, letting the just-sent bubble render without a remote download.
+func (mc *MediaCache) StoreOutgoingMedia(chatJID, messageID, mimetype, mediaType, fileName, source string) (string, error) {
+	destination := mc.mediaPath(chatJID, messageID, mimetype, mediaType, fileName)
+	if err := os.MkdirAll(filepath.Dir(destination), 0755); err != nil {
+		return "", fmt.Errorf("failed to create media cache directory: %w", err)
+	}
+	input, err := os.Open(source)
+	if err != nil {
+		return "", fmt.Errorf("failed to open staged media: %w", err)
+	}
+	defer input.Close()
+	output, err := os.Create(destination)
+	if err != nil {
+		return "", fmt.Errorf("failed to create media cache file: %w", err)
+	}
+	_, copyErr := io.Copy(output, input)
+	closeErr := output.Close()
+	if copyErr != nil {
+		return "", fmt.Errorf("failed to cache outgoing media: %w", copyErr)
+	}
+	if closeErr != nil {
+		return "", fmt.Errorf("failed to close cached media: %w", closeErr)
+	}
+	return destination, nil
 }
 
 // SaveMedia downloads media from the raw message proto and saves to disk

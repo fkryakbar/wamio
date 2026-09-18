@@ -11,6 +11,7 @@ interface PaginationMeta {
 interface ChatState {
   // State
   chats: ChatItem[];
+	activeRailView: 'chats' | 'calls';
 	chatLists: ChatList[];
 	activeChatListID: string;
   activeChatJID: string | null;
@@ -26,11 +27,15 @@ interface ChatState {
 
   // Actions
   setChats: (chats: ChatItem[]) => void;
+	setActiveRailView: (view: 'chats' | 'calls') => void;
 	setChatLists: (lists: ChatList[]) => void;
 	setActiveChatList: (id: string) => void;
   updateChat: (chat: ChatItem) => void;
   setActiveChat: (jid: string | null) => void;
   addMessage: (chatJid: string, message: MessageItem) => void;
+  addOptimisticMessage: (message: MessageItem, preview: string) => void;
+  markOutgoingFailed: (chatJid: string, clientRequestId: string) => void;
+  retryOutgoing: (chatJid: string, previousRequestId: string, clientRequestId: string) => void;
   updateMessageReceipts: (chatJid: string, ids: string[], status: 'delivered' | 'read') => void;
   updateMessageReactions: (chatJid: string, messageId: string, reactions: MessageReaction[]) => void;
   removeMessage: (chatJid: string, messageId: string, forMe: boolean) => void;
@@ -70,6 +75,15 @@ function strongestDeliveryStatus(
   return deliveryStatusRank(first) >= deliveryStatusRank(second) ? (first || '') : (second || '');
 }
 
+function keepNewestDeliveryStatus(existing: MessageItem | undefined, incoming: MessageItem): MessageItem {
+  if (!existing || !existing.isFromMe || !incoming.isFromMe) return incoming;
+  return {
+    ...incoming,
+    deliveryStatus: strongestDeliveryStatus(existing.deliveryStatus, incoming.deliveryStatus),
+    isRead: existing.isRead || incoming.isRead,
+  };
+}
+
 function isSamePreview(first: ChatItem, second: ChatItem): boolean {
   return first.lastMessageTime === second.lastMessageTime &&
     first.lastMessage === second.lastMessage &&
@@ -80,6 +94,7 @@ function sortChats(chats: ChatItem[]) { return chats.sort((a, b) => Number(b.isP
 
 export const useChatStore = create<ChatState>((set, get) => ({
   chats: [],
+	activeRailView: 'chats',
 	chatLists: [],
 	activeChatListID: 'all',
   activeChatJID: null,
@@ -96,35 +111,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setChats: (incoming) =>
     set((state) => {
       const chatMap = new Map<string, ChatItem>();
-      for (const c of state.chats) {
-        chatMap.set(c.jid, c);
-      }
+      // GetChats and wa:chats-sync are complete backend snapshots. Their
+      // unread state is authoritative, including reads made on other devices.
       for (const c of incoming) {
-        const existing = chatMap.get(c.jid);
-        if (existing) {
-          const samePreview = isSamePreview(existing, c);
-          if (c.lastMessageTime > existing.lastMessageTime ||
-              samePreview) {
-            chatMap.set(c.jid, {
-              ...c,
-              lastMessageStatus: samePreview && c.lastMessageFromMe
-                ? strongestDeliveryStatus(existing.lastMessageStatus, c.lastMessageStatus)
-                : c.lastMessageStatus,
-            });
-          } else {
-            chatMap.set(c.jid, {
-              ...existing,
-              unreadCount: Math.max(existing.unreadCount, c.unreadCount),
-              isArchived: c.isArchived,
-            });
-          }
-        } else {
-          chatMap.set(c.jid, c);
-        }
+        const existing = state.chats.find((chat) => chat.jid === c.jid);
+        chatMap.set(c.jid, {
+          ...c,
+          // Avatars are fetched client-side and are not part of GetChats.
+          avatar: c.avatar || existing?.avatar,
+          lastMessageStatus: c.lastMessageFromMe
+            ? strongestDeliveryStatus(existing?.lastMessageStatus, c.lastMessageStatus)
+            : c.lastMessageStatus,
+        });
       }
 	      const merged = sortChats(Array.from(chatMap.values()));
       return { chats: merged };
     }),
+
+	setActiveRailView: (activeRailView) => set({ activeRailView }),
 
   updateChat: (chat) =>
     set((state) => {
@@ -150,6 +154,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
   addMessage: (chatJid, message) =>
     set((state) => {
       const existing = state.messages[chatJid] || [];
+			const optimisticIndex = message.clientRequestId
+				? existing.findIndex((item) => item.clientRequestId === message.clientRequestId)
+				: -1;
+			if (optimisticIndex >= 0) {
+				const next = [...existing];
+				next[optimisticIndex] = message;
+				return { messages: { ...state.messages, [chatJid]: next } };
+			}
       if (
         existing.some(
           (m) =>
@@ -169,13 +181,68 @@ export const useChatStore = create<ChatState>((set, get) => ({
       };
     }),
 
+  addOptimisticMessage: (message, preview) =>
+    set((state) => {
+      const existing = state.messages[message.chatJid] || [];
+      const chats = state.chats.map((chat) => chat.jid === message.chatJid
+        ? {
+            ...chat,
+            lastMessage: preview,
+            lastMessageTime: message.timestamp,
+            lastMessageFromMe: true,
+            lastMessageStatus: 'pending',
+          }
+        : chat);
+      return {
+        messages: { ...state.messages, [message.chatJid]: [...existing, message] },
+        chats: sortChats(chats),
+      };
+    }),
+
+  markOutgoingFailed: (chatJid, clientRequestId) =>
+    set((state) => ({
+      messages: {
+        ...state.messages,
+        [chatJid]: (state.messages[chatJid] || []).map((message) =>
+          message.clientRequestId === clientRequestId
+            ? { ...message, localState: 'failed', deliveryStatus: 'failed' }
+            : message
+        ),
+      },
+      chats: state.chats.map((chat) => chat.jid === chatJid && chat.lastMessageStatus === 'pending'
+        ? { ...chat, lastMessageStatus: 'failed' }
+        : chat),
+    })),
+
+  retryOutgoing: (chatJid, previousRequestId, clientRequestId) =>
+    set((state) => ({
+      messages: {
+        ...state.messages,
+        [chatJid]: (state.messages[chatJid] || []).map((message) =>
+          message.clientRequestId === previousRequestId
+            ? { ...message, id: `local:${clientRequestId}`, clientRequestId, localState: 'pending', deliveryStatus: 'pending' }
+            : message
+        ),
+      },
+      chats: state.chats.map((chat) => chat.jid === chatJid
+        ? { ...chat, lastMessageStatus: 'pending' }
+        : chat),
+    })),
+
   updateMessageReceipts: (chatJid, ids, status) =>
     set((state) => ({
       messages: {
         ...state.messages,
         [chatJid]: (state.messages[chatJid] || []).map((message) =>
           message.isFromMe && ids.includes(message.id)
-            ? { ...message, deliveryStatus: status, isRead: status === 'read' }
+            ? {
+                ...message,
+                // Receipt stanzas can arrive out of order. A delayed
+                // "delivered" must never turn a blue/read receipt back into
+                // a delivered one in the conversation.
+                deliveryStatus: strongestDeliveryStatus(message.deliveryStatus, status),
+                isRead: message.isRead || status === 'read',
+              }
             : message
         ),
       },
@@ -206,6 +273,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   setMessages: (chatJid, messages) =>
     set((state) => {
+      const existing = new Map((state.messages[chatJid] || []).map((message) => [message.id, message]));
       const seen = new Set<string>();
       const deduped = messages.filter((m) => {
         const key = m.id || `${m.timestamp}-${m.content}-${m.isFromMe}`;
@@ -216,7 +284,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return {
         messages: {
           ...state.messages,
-          [chatJid]: deduped,
+          [chatJid]: deduped.map((message) => keepNewestDeliveryStatus(existing.get(message.id), message)),
         },
       };
     }),
@@ -225,7 +293,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((state) => {
       const byID = new Map<string, MessageItem>();
       for (const message of state.messages[chatJid] || []) byID.set(message.id, message);
-      for (const message of incoming) byID.set(message.id, { ...byID.get(message.id), ...message });
+      for (const message of incoming) {
+        const previous = byID.get(message.id);
+        byID.set(message.id, keepNewestDeliveryStatus(previous, { ...previous, ...message }));
+      }
       const merged = Array.from(byID.values()).sort((first, second) =>
         first.timestamp === second.timestamp ? first.id.localeCompare(second.id) : first.timestamp - second.timestamp
       );
@@ -248,6 +319,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setInitialMessages: (chatJid, page) =>
     set((state) => {
       const msgs = page.messages;
+      const existing = new Map((state.messages[chatJid] || []).map((message) => [message.id, message]));
       const seen = new Set<string>();
       const deduped = msgs.filter((m) => {
         const key = m.id || `${m.timestamp}-${m.content}-${m.isFromMe}`;
@@ -259,7 +331,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return {
         messages: {
           ...state.messages,
-          [chatJid]: deduped,
+          [chatJid]: deduped.map((message) => keepNewestDeliveryStatus(existing.get(message.id), message)),
         },
         pagination: {
           ...state.pagination,
@@ -338,6 +410,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   reset: () =>
     set({
       chats: [],
+		activeRailView: 'chats',
 		chatLists: [],
 		activeChatListID: 'all',
       activeChatJID: null,

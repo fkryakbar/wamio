@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { X } from 'lucide-react';
 import type { ChatItem, ChatProfile } from '../types';
 
 interface ContactInfoPanelProps {
@@ -26,7 +27,7 @@ export function ContactInfoPanel({ chat, onClose }: ContactInfoPanelProps) {
   return (
     <aside className="contact-info" aria-label="Info kontak">
       <header className="contact-info__header">
-        <button type="button" onClick={onClose} aria-label="Tutup info kontak">×</button>
+        <button type="button" onClick={onClose} aria-label="Tutup info kontak"><X size={22} /></button>
         <span>{chat.isGroup ? 'Info grup' : 'Info kontak'}</span>
       </header>
       <div className="contact-info__body">

@@ -22,6 +22,29 @@ func setupTestChatStore(t *testing.T) *ChatStore {
 	return cs
 }
 
+func TestChatStoreRecentStickersAreOrderedAndBounded(t *testing.T) {
+	cs := setupTestChatStore(t)
+	for _, row := range []StickerRow{
+		{ID: "older", Mimetype: "image/webp", LastUsedAt: 10, MediaKey: []byte{1}},
+		{ID: "newer", Mimetype: "image/webp", LastUsedAt: 20, MediaKey: []byte{2}},
+	} {
+		if err := cs.UpsertRecentSticker(row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := cs.GetRecentStickers(10)
+	if err != nil || len(rows) != 2 || rows[0].ID != "newer" {
+		t.Fatalf("GetRecentStickers rows=%+v err=%v", rows, err)
+	}
+	if err := cs.TrimRecentStickers(1); err != nil {
+		t.Fatal(err)
+	}
+	rows, err = cs.GetRecentStickers(10)
+	if err != nil || len(rows) != 1 || rows[0].ID != "newer" {
+		t.Fatalf("TrimRecentStickers rows=%+v err=%v", rows, err)
+	}
+}
+
 func seedMessages(t *testing.T, cs *ChatStore, chatJID string) {
 	t.Helper()
 	timestamps := []int64{100, 200, 300, 400, 500}

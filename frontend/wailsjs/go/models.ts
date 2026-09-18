@@ -180,6 +180,82 @@ export namespace waAdv {
 
 export namespace whatsapp {
 	
+	export class UserInfo {
+	    jid: string;
+	    pushName: string;
+	    phoneNumber: string;
+	    platform: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new UserInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.jid = source["jid"];
+	        this.pushName = source["pushName"];
+	        this.phoneNumber = source["phoneNumber"];
+	        this.platform = source["platform"];
+	    }
+	}
+	export class AccountInfo {
+	    id: string;
+	    label: string;
+	    userInfo: UserInfo;
+	    isActive: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new AccountInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.label = source["label"];
+	        this.userInfo = this.convertValues(source["userInfo"], UserInfo);
+	        this.isActive = source["isActive"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class AttachmentDraft {
+	    id: string;
+	    kind: string;
+	    fileName: string;
+	    mimetype: string;
+	    fileSize: number;
+	    isPtt?: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new AttachmentDraft(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.kind = source["kind"];
+	        this.fileName = source["fileName"];
+	        this.mimetype = source["mimetype"];
+	        this.fileSize = source["fileSize"];
+	        this.isPtt = source["isPtt"];
+	    }
+	}
 	export class CallInfo {
 	    callId: string;
 	    outcome: string;
@@ -194,6 +270,30 @@ export namespace whatsapp {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.callId = source["callId"];
+	        this.outcome = source["outcome"];
+	        this.duration = source["duration"];
+	        this.isVideo = source["isVideo"];
+	        this.isIncoming = source["isIncoming"];
+	    }
+	}
+	export class CallLogEntry {
+	    chatJid: string;
+	    chatName: string;
+	    timestamp: number;
+	    outcome: string;
+	    duration?: number;
+	    isVideo: boolean;
+	    isIncoming: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new CallLogEntry(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.chatJid = source["chatJid"];
+	        this.chatName = source["chatName"];
+	        this.timestamp = source["timestamp"];
 	        this.outcome = source["outcome"];
 	        this.duration = source["duration"];
 	        this.isVideo = source["isVideo"];
@@ -339,6 +439,7 @@ export namespace whatsapp {
 	    thumbnail?: string;
 	    isPtt?: boolean;
 	    deliveryStatus?: string;
+	    clientRequestId?: string;
 	    replyTo?: MessageReference;
 	    isForwarded?: boolean;
 	    isDeleted?: boolean;
@@ -370,6 +471,7 @@ export namespace whatsapp {
 	        this.thumbnail = source["thumbnail"];
 	        this.isPtt = source["isPtt"];
 	        this.deliveryStatus = source["deliveryStatus"];
+	        this.clientRequestId = source["clientRequestId"];
 	        this.replyTo = this.convertValues(source["replyTo"], MessageReference);
 	        this.isForwarded = source["isForwarded"];
 	        this.isDeleted = source["isDeleted"];
@@ -513,22 +615,26 @@ export namespace whatsapp {
 	        this.accountId = source["accountId"];
 	    }
 	}
-	export class UserInfo {
-	    jid: string;
-	    pushName: string;
-	    phoneNumber: string;
-	    platform: string;
+	export class StickerItem {
+	    id: string;
+	    mimetype: string;
+	    width: number;
+	    height: number;
+	    lastUsedAt: number;
+	    available: boolean;
 	
 	    static createFrom(source: any = {}) {
-	        return new UserInfo(source);
+	        return new StickerItem(source);
 	    }
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.jid = source["jid"];
-	        this.pushName = source["pushName"];
-	        this.phoneNumber = source["phoneNumber"];
-	        this.platform = source["platform"];
+	        this.id = source["id"];
+	        this.mimetype = source["mimetype"];
+	        this.width = source["width"];
+	        this.height = source["height"];
+	        this.lastUsedAt = source["lastUsedAt"];
+	        this.available = source["available"];
 	    }
 	}
 

@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { ConnectionState, QRCodeEvent, UserInfo } from '../types';
+import type { AccountInfo, ConnectionState, QRCodeEvent, UserInfo } from '../types';
 
 interface AuthState {
   // State
@@ -7,13 +7,16 @@ interface AuthState {
   qrCode: string | null;
   userInfo: UserInfo | null;
   accountId: string;
+	accounts: AccountInfo[];
   errorMessage: string | null;
 
   // Actions
   setConnectionState: (state: ConnectionState) => void;
   setQRCode: (qr: QRCodeEvent) => void;
+	clearQRCode: () => void;
   setUserInfo: (info: UserInfo | null) => void;
   setAccountId: (id: string) => void;
+	setAccounts: (accounts: AccountInfo[]) => void;
   setError: (message: string | null) => void;
   reset: () => void;
 }
@@ -22,7 +25,8 @@ const initialState = {
   connectionState: 'disconnected' as ConnectionState,
   qrCode: null as string | null,
   userInfo: null as UserInfo | null,
-  accountId: 'default',
+  accountId: '',
+	accounts: [] as AccountInfo[],
   errorMessage: null as string | null,
 };
 
@@ -42,9 +46,13 @@ export const useAuthStore = create<AuthState>((set) => ({
     }
   },
 
+	clearQRCode: () => set({ qrCode: null }),
+
   setUserInfo: (info) => set({ userInfo: info }),
 
   setAccountId: (id) => set({ accountId: id }),
+
+	setAccounts: (accounts) => set({ accounts }),
 
   setError: (message) => set({ errorMessage: message }),
 

@@ -1,11 +1,13 @@
-import { useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { LoginPage } from './pages/LoginPage';
+import { AppRail } from './components/AppRail';
 import { Sidebar } from './components/Sidebar';
 import { ChatView } from './components/ChatView';
+import { CallLogView } from './components/CallLogView';
 import { useAuthStore } from './stores/authStore';
 import { useChatStore } from './stores/chatStore';
-import type { ConnectionStatusEvent, MessageEvent, ChatUpdateEvent, ChatItem, ChatList, NotificationEvent, InitialSyncEvent, HistoryPageEvent, MessageReceiptEvent, SyncProgressEvent, PresenceEvent, ChatPresenceEvent, MessageReactionEvent, MessageDeleteEvent } from './types';
-import { EventsOn } from '../wailsjs/runtime/runtime';
+import type { AccountInfo, ConnectionStatusEvent, MessageEvent, ChatUpdateEvent, ChatItem, ChatList, NotificationEvent, InitialSyncEvent, HistoryPageEvent, MessageReceiptEvent, QRCodeEvent, SyncProgressEvent, PresenceEvent, ChatPresenceEvent, MessageReactionEvent, MessageDeleteEvent } from './types';
+import { EventsOn, WindowSetTitle } from '../wailsjs/runtime/runtime';
 
 function FullScreenLoading({ text, progress }: { text: string; progress: SyncProgressEvent | null }) {
   return (
@@ -23,20 +25,171 @@ function FullScreenLoading({ text, progress }: { text: string; progress: SyncPro
 }
 
 function App() {
-  const { connectionState, setConnectionState, userInfo } = useAuthStore();
-  const { setChats, setChatLists, updateChat, addMessage, updateMessageReceipts, updateMessageReactions, removeMessage, initialSyncState, setInitialSyncState, prependMessagesPage, syncProgress } = useChatStore();
+  const { connectionState, setConnectionState, setQRCode, setUserInfo, setAccountId, setAccounts, setError, clearQRCode, accounts } = useAuthStore();
+  const { setChats, setChatLists, updateChat, addMessage, updateMessageReceipts, updateMessageReactions, removeMessage, initialSyncState, setInitialSyncState, prependMessagesPage, syncProgress, activeRailView } = useChatStore();
+  const [appMode, setAppMode] = useState<'booting' | 'login' | 'linking' | 'switching' | 'workspace'>('booting');
+  const [loginMode, setLoginMode] = useState<'initial' | 'add'>('initial');
+  const appModeRef = useRef(appMode);
   const typingTimeoutsRef = useRef<Record<string, number>>({});
 	const notificationRef = useRef<Notification | null>(null);
 	const notificationTimerRef = useRef<number | null>(null);
+  const unreadTotal = useChatStore((state) => state.chats.filter((chat) => chat.unreadCount > 0).length);
+
+  useEffect(() => { appModeRef.current = appMode; }, [appMode]);
+
+  useEffect(() => {
+    const badge = unreadTotal > 99 ? '99+' : String(unreadTotal);
+    const title = unreadTotal > 0 ? `(${badge}) Wamio` : 'Wamio';
+    document.title = title;
+    WindowSetTitle(title);
+  }, [unreadTotal]);
 
   // Global connection event listener
   useEffect(() => {
     const cancelConn = EventsOn('wa:connection', (data: ConnectionStatusEvent) => {
       setConnectionState(data.state);
+      if (data.state === 'connected') {
+        setAppMode('workspace');
+        import('../wailsjs/go/whatsapp/WhatsAppService').then(async (mod) => {
+          const [info, knownAccounts] = await Promise.all([
+            mod.GetUserInfo().catch(() => null),
+            mod.GetAccounts().catch(() => [] as AccountInfo[]),
+          ]);
+          if (info) setUserInfo(info);
+          setAccounts(knownAccounts || []);
+          const active = knownAccounts?.find((account: AccountInfo) => account.isActive);
+          if (active) setAccountId(active.id);
+        }).catch(() => {});
+      } else if (data.state === 'disconnected' || data.state === 'logged_out') {
+        const mode = appModeRef.current;
+        if (mode === 'booting' || mode === 'switching') {
+          setLoginMode('initial');
+          setAppMode('login');
+        } else if (mode === 'linking') {
+          setLoginMode('add');
+          setAppMode('login');
+        }
+        if (data.message) setError(data.message);
+      }
     });
+    const cancelQR = EventsOn('wa:qr-code', (data: QRCodeEvent) => setQRCode(data));
+    const cancelAccounts = EventsOn('wa:accounts-changed', (data: AccountInfo[]) => setAccounts(data || []));
 
-    return () => { cancelConn(); };
-  }, [setConnectionState]);
+    return () => { cancelConn(); cancelQR(); cancelAccounts(); };
+  }, [setAccountId, setAccounts, setConnectionState, setError, setQRCode, setUserInfo]);
+
+  // Restore is initiated before any login surface is eligible to render. This
+  // avoids the Hubungkan page flashing while the last account reconnects.
+  useEffect(() => {
+    let active = true;
+    import('../wailsjs/go/whatsapp/WhatsAppService').then(async (mod) => {
+      try {
+        const restored = await mod.RestoreLastSession();
+        if (!active) return;
+        if (!restored.attempted) {
+          setLoginMode('initial');
+          setAppMode('login');
+          return;
+        }
+        if (restored.accountId) setAccountId(restored.accountId);
+      } catch (error: any) {
+        if (!active) return;
+        setConnectionState('disconnected');
+        setError(error?.message || 'Akun terakhir tidak dapat dipulihkan');
+        setLoginMode('initial');
+        setAppMode('login');
+      }
+    }).catch(() => {
+      if (!active) return;
+      setConnectionState('disconnected');
+      setError('Aplikasi belum siap');
+      setLoginMode('initial');
+      setAppMode('login');
+    });
+    return () => { active = false; };
+  }, [setAccountId, setConnectionState, setError]);
+
+  const beginPairing = useCallback(async (label: string) => {
+    setAppMode('linking');
+    setError(null);
+    clearQRCode();
+    setUserInfo(null);
+    useChatStore.getState().reset();
+    try {
+      const mod = await import('../wailsjs/go/whatsapp/WhatsAppService');
+      await mod.BeginAddAccount(label);
+    } catch (error) {
+      setConnectionState('disconnected');
+      setAppMode('login');
+      throw error;
+    }
+  }, [clearQRCode, setConnectionState, setError, setUserInfo]);
+
+  const addAccount = useCallback(() => {
+    setLoginMode('add');
+    setAppMode('login');
+    setAccountId('');
+    setError(null);
+    clearQRCode();
+    setUserInfo(null);
+  }, [clearQRCode, setAccountId, setError, setUserInfo]);
+
+  const switchAccount = useCallback(async (accountID: string) => {
+    setAppMode('switching');
+    setError(null);
+    clearQRCode();
+    setUserInfo(null);
+    useChatStore.getState().reset();
+    try {
+      const mod = await import('../wailsjs/go/whatsapp/WhatsAppService');
+      await mod.SwitchAccount(accountID);
+    } catch (error: any) {
+      setConnectionState('disconnected');
+      setError(error?.message || 'Gagal membuka akun');
+      setLoginMode('initial');
+      setAppMode('login');
+    }
+  }, [clearQRCode, setConnectionState, setError, setUserInfo]);
+
+  const cancelAddAccount = useCallback(async () => {
+    // Before pairing starts, the Add account page is only a form; returning
+    // from it must not ask the backend to cancel a session that does not exist.
+    if (appModeRef.current !== 'linking') {
+      setAppMode('workspace');
+      setError(null);
+      return;
+    }
+    setAppMode('switching');
+    setError(null);
+    clearQRCode();
+    setUserInfo(null);
+    try {
+      const mod = await import('../wailsjs/go/whatsapp/WhatsAppService');
+      await mod.CancelAddAccount();
+    } catch (error: any) {
+      setConnectionState('disconnected');
+      setError(error?.message || 'Gagal kembali ke akun sebelumnya');
+      setLoginMode('add');
+      setAppMode('login');
+    }
+  }, [clearQRCode, setConnectionState, setError, setUserInfo]);
+
+  const logout = useCallback(async () => {
+    setAppMode('switching');
+    setError(null);
+    clearQRCode();
+    setUserInfo(null);
+    useChatStore.getState().reset();
+    try {
+      const mod = await import('../wailsjs/go/whatsapp/WhatsAppService');
+      await mod.Logout();
+    } catch (error: any) {
+      setConnectionState('disconnected');
+      setError(error?.message || 'Gagal logout');
+      setLoginMode('initial');
+      setAppMode('login');
+    }
+  }, [clearQRCode, setConnectionState, setError, setUserInfo]);
 
   // Initial sync lifecycle listener (always subscribed)
   useEffect(() => {
@@ -179,9 +332,16 @@ function App() {
     };
   }, [connectionState, setChats, setChatLists, updateChat, addMessage, updateMessageReceipts, updateMessageReactions, removeMessage]);
 
-  // Show login page if not connected
-  if (connectionState !== 'connected') {
-    return <LoginPage />;
+  if (appMode === 'booting') {
+    return <FullScreenLoading text="Memuat akun terakhir..." progress={null} />;
+  }
+
+  if (appMode === 'switching') {
+    return <FullScreenLoading text="Membuka akun..." progress={null} />;
+  }
+
+  if (appMode === 'login' || appMode === 'linking' || connectionState !== 'connected') {
+    return <LoginPage mode={loginMode} onBeginPairing={beginPairing} onCancel={loginMode === 'add' ? () => { void cancelAddAccount(); } : undefined} />;
   }
 
   // Gate: block chat UI until initial sync completes
@@ -192,8 +352,9 @@ function App() {
   // Connected + synced — show chat interface
   return (
     <div className="app-container">
+      <AppRail accounts={accounts} onAddAccount={addAccount} onSwitchAccount={(accountID) => { void switchAccount(accountID); }} onLogout={() => { void logout(); }} />
       <Sidebar />
-      <ChatView />
+      {activeRailView === 'calls' ? <CallLogView /> : <ChatView />}
     </div>
   );
 }

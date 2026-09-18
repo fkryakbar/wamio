@@ -36,6 +36,5 @@ type AccountInfo struct {
 	ID       string   `json:"id"`
 	Label    string   `json:"label"`
 	UserInfo UserInfo `json:"userInfo"`
-	DBPath   string   `json:"dbPath"`
 	IsActive bool     `json:"isActive"`
 }

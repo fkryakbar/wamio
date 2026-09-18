@@ -7,7 +7,8 @@ import {
   useState,
   type MouseEvent as ReactMouseEvent,
 } from "react";
-import { EventsOn } from "../../wailsjs/runtime/runtime";
+import { ArrowDown } from "lucide-react";
+import { EventsOn, OnFileDrop, OnFileDropOff } from "../../wailsjs/runtime/runtime";
 import { useChatStore } from "../stores/chatStore";
 import { MessageInput } from "./MessageInput";
 import { MediaMessage } from "./MediaMessage";
@@ -69,6 +70,12 @@ function toReference(message: MessageItem): MessageReference {
 }
 
 function Receipt({ status }: { status: string }) {
+	if (status === "pending") {
+		return <span className="message__pending" aria-label="Mengirim" title="Mengirim" />;
+	}
+	if (status === "failed") {
+		return <span className="message__failed" aria-label="Gagal dikirim" title="Gagal dikirim">!</span>;
+	}
   return (
     <svg
       className={`message__check message__check--${status}`}
@@ -104,6 +111,7 @@ interface MessageBubbleProps {
   onRevealReply: (reference: MessageReference) => void;
   onMenu: (event: ReactMouseEvent, message: MessageItem) => void;
   onReact: (message: MessageItem, emoji: string) => void;
+  onRetry: (message: MessageItem) => void;
   registerElement: (messageID: string, element: HTMLDivElement | null) => void;
 }
 
@@ -120,6 +128,7 @@ function MessageBubble({
   onRevealReply,
   onMenu,
   onReact,
+  onRetry,
   registerElement,
 }: MessageBubbleProps) {
   const hasMedia = !message.isDeleted && !!message.mediaType;
@@ -206,6 +215,9 @@ function MessageBubble({
             <Receipt status={message.deliveryStatus || "sent"} />
           )}
         </span>
+				{message.isFromMe && message.deliveryStatus === 'failed' && (
+					<button type="button" className="message__retry" onClick={(event) => { event.stopPropagation(); onRetry(message); }}>Coba lagi</button>
+				)}
         {!!message.reactions?.length && (
           <div className="message__reactions" aria-label="Reaksi pesan">
             {message.reactions.map((reaction) => (
@@ -361,6 +373,8 @@ export function ChatView() {
     mergeMessages,
     setLoadingMore,
     presence,
+		retryOutgoing,
+		markOutgoingFailed,
   } = useChatStore();
   const chat = activeChat();
   const chatMessages = activeChatJID ? messages[activeChatJID] || [] : [];
@@ -551,6 +565,19 @@ export function ChatView() {
   }, [onScroll]);
 
   useEffect(() => {
+    OnFileDrop((_x, _y, paths) => {
+      if (!activeChatJID || !paths.length) return;
+      import("../../wailsjs/go/main/App")
+        .then((app) => app.StageDroppedAttachments(paths))
+        .then((drafts) => {
+          if (drafts?.length) window.dispatchEvent(new CustomEvent('wamio:attachments', { detail: drafts }));
+        })
+        .catch(() => setNotice('File tidak dapat disiapkan.'));
+    }, true);
+    return () => OnFileDropOff();
+  }, [activeChatJID]);
+
+  useEffect(() => {
     const onEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setMenu(null);
@@ -608,6 +635,24 @@ export function ChatView() {
       await mod.ReactToMessage(message.chatJid, message.id, emoji);
     } catch {
       setNotice("Reaksi gagal dikirim.");
+    }
+  };
+
+  const retry = async (message: MessageItem) => {
+    const clientRequestId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+    retryOutgoing(message.chatJid, message.clientRequestId || '', clientRequestId);
+    try {
+      const mod = await import("../../wailsjs/go/whatsapp/WhatsAppService");
+      if (message.draftId) {
+        await mod.SendAttachment(message.chatJid, message.draftId, message.caption || '', clientRequestId);
+      } else if (message.replyTo) {
+        await mod.SendReply(message.chatJid, message.content, message.replyTo, clientRequestId);
+      } else {
+        await mod.SendMessage(message.chatJid, message.content, clientRequestId);
+      }
+    } catch {
+      markOutgoingFailed(message.chatJid, clientRequestId);
+      setNotice('Pesan gagal dikirim. Coba lagi saat koneksi tersedia.');
     }
   };
   const copy = async (text: string) => {
@@ -819,6 +864,7 @@ export function ChatView() {
                 onRevealReply={(reference) => void revealReply(reference)}
                 onMenu={openMenu}
                 onReact={(message, emoji) => void react(message, emoji)}
+                onRetry={(message) => void retry(message)}
                 registerElement={registerElement}
               />
             ) : null,
@@ -831,9 +877,7 @@ export function ChatView() {
             className="chatview__scroll-bottom"
             onClick={scrollToBottom}
             aria-label="Scroll ke pesan terbaru"
-          >
-            ↓
-          </button>
+          ><ArrowDown size={21} /></button>
         )}
       </div>
       {selecting && (

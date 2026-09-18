@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect } from 'react';
+import { TriangleAlert } from 'lucide-react';
 import type { DocumentState, MessageItem } from '../types';
 import { FormattedMessage } from './FormattedMessage';
 
@@ -99,7 +100,7 @@ export function MediaMessage({ message, onOpenLightbox }: MediaMessageProps) {
 				{loading ? (
 					<div className="spinner spinner--sm" />
             ) : error ? (
-              <span className="media-message__error">⚠️ Gagal memuat</span>
+              <span className="media-message__error"><TriangleAlert size={16} /> Gagal memuat</span>
             ) : (
               <>
                 <svg width="32" height="32" viewBox="0 0 24 24" fill="var(--text-tertiary)">

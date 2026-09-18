@@ -100,6 +100,21 @@ func (cs *ChatStore) createTables() error {
 			PRIMARY KEY (chat_jid, message_id, reactor_jid)
 		);
 
+		CREATE TABLE IF NOT EXISTS wamio_recent_stickers (
+			id TEXT PRIMARY KEY,
+			url TEXT NOT NULL DEFAULT '',
+			file_sha256 BLOB NOT NULL DEFAULT X'',
+			file_enc_sha256 BLOB NOT NULL DEFAULT X'',
+			media_key BLOB NOT NULL DEFAULT X'',
+			mimetype TEXT NOT NULL DEFAULT '',
+			width INTEGER NOT NULL DEFAULT 0,
+			height INTEGER NOT NULL DEFAULT 0,
+			direct_path TEXT NOT NULL DEFAULT '',
+			file_length INTEGER NOT NULL DEFAULT 0,
+			last_used_at INTEGER NOT NULL DEFAULT 0,
+			is_lottie INTEGER NOT NULL DEFAULT 0
+		);
+
 		CREATE INDEX IF NOT EXISTS idx_messages_chat_ts ON wamio_messages(chat_jid, timestamp);
 		CREATE INDEX IF NOT EXISTS idx_reactions_message ON wamio_message_reactions(chat_jid, message_id);
 	`)
@@ -212,6 +227,18 @@ type MessageRow struct {
 	CallIsIncoming  bool
 }
 
+// CallLogRow is the minimal durable data needed by the call-log screen.
+// Keeping it separate from MessageRow avoids exposing unrelated message data.
+type CallLogRow struct {
+	ChatJID    string
+	ChatName   string
+	Timestamp  int64
+	Outcome    string
+	Duration   int64
+	IsVideo    bool
+	IsIncoming bool
+}
+
 type ChatListRow struct {
 	ID       string
 	Name     string
@@ -228,6 +255,62 @@ type ReactionRow struct {
 	ReactorJID string
 	Emoji      string
 	Timestamp  int64
+}
+
+// StickerRow keeps encrypted-download metadata private to the local account
+// database. Only a reduced StickerItem is ever returned to the frontend.
+type StickerRow struct {
+	ID            string
+	URL           string
+	FileSHA256    []byte
+	FileEncSHA256 []byte
+	MediaKey      []byte
+	Mimetype      string
+	Width         uint32
+	Height        uint32
+	DirectPath    string
+	FileLength    uint64
+	LastUsedAt    int64
+	IsLottie      bool
+}
+
+func (cs *ChatStore) UpsertRecentSticker(sticker StickerRow) error {
+	_, err := cs.db.Exec(`
+		INSERT INTO wamio_recent_stickers (id, url, file_sha256, file_enc_sha256, media_key, mimetype, width, height, direct_path, file_length, last_used_at, is_lottie)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			url = excluded.url, file_sha256 = excluded.file_sha256, file_enc_sha256 = excluded.file_enc_sha256,
+			media_key = excluded.media_key, mimetype = excluded.mimetype, width = excluded.width, height = excluded.height,
+			direct_path = excluded.direct_path, file_length = excluded.file_length, last_used_at = MAX(excluded.last_used_at, wamio_recent_stickers.last_used_at), is_lottie = excluded.is_lottie
+	`, sticker.ID, sticker.URL, sticker.FileSHA256, sticker.FileEncSHA256, sticker.MediaKey, sticker.Mimetype, sticker.Width, sticker.Height, sticker.DirectPath, sticker.FileLength, sticker.LastUsedAt, sticker.IsLottie)
+	return err
+}
+
+func (cs *ChatStore) GetRecentStickers(limit int) ([]StickerRow, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	rows, err := cs.db.Query(`SELECT id, url, file_sha256, file_enc_sha256, media_key, mimetype, width, height, direct_path, file_length, last_used_at, is_lottie FROM wamio_recent_stickers ORDER BY last_used_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []StickerRow{}
+	for rows.Next() {
+		var sticker StickerRow
+		var isLottie int
+		if err := rows.Scan(&sticker.ID, &sticker.URL, &sticker.FileSHA256, &sticker.FileEncSHA256, &sticker.MediaKey, &sticker.Mimetype, &sticker.Width, &sticker.Height, &sticker.DirectPath, &sticker.FileLength, &sticker.LastUsedAt, &isLottie); err != nil {
+			return nil, err
+		}
+		sticker.IsLottie = isLottie != 0
+		result = append(result, sticker)
+	}
+	return result, rows.Err()
+}
+
+func (cs *ChatStore) TrimRecentStickers(max int) error {
+	_, err := cs.db.Exec(`DELETE FROM wamio_recent_stickers WHERE id NOT IN (SELECT id FROM wamio_recent_stickers ORDER BY last_used_at DESC LIMIT ?)`, max)
+	return err
 }
 
 const messageRowColumns = `id, chat_jid, sender_jid, sender_name, content, timestamp,
@@ -471,6 +554,38 @@ func (cs *ChatStore) GetMessagesBefore(chatJID string, beforeTimestamp int64, li
 func (cs *ChatStore) UpdateChatUnread(jid string, unreadCount int) error {
 	_, err := cs.db.Exec(`UPDATE wamio_chats SET unread_count = ? WHERE jid = ?`, unreadCount, jid)
 	return err
+}
+
+// GetCallLog returns locally synchronized WhatsApp call records newest first.
+func (cs *ChatStore) GetCallLog(limit int) ([]CallLogRow, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	rows, err := cs.db.Query(`
+		SELECT m.chat_jid, COALESCE(c.name, ''), m.timestamp, m.call_outcome,
+		       m.call_duration, m.call_is_video, m.call_is_incoming
+		FROM wamio_messages AS m
+		LEFT JOIN wamio_chats AS c ON c.jid = m.chat_jid
+		WHERE m.kind = 'call'
+		ORDER BY m.timestamp DESC, m.call_id DESC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make([]CallLogRow, 0)
+	for rows.Next() {
+		var row CallLogRow
+		var isVideo, isIncoming int
+		if err := rows.Scan(&row.ChatJID, &row.ChatName, &row.Timestamp, &row.Outcome, &row.Duration, &isVideo, &isIncoming); err != nil {
+			return nil, err
+		}
+		row.IsVideo, row.IsIncoming = isVideo != 0, isIncoming != 0
+		result = append(result, row)
+	}
+	return result, rows.Err()
 }
 
 // GetUnreadIncomingMessages returns local incoming messages that have not yet
@@ -784,7 +899,7 @@ func (cs *ChatStore) TrimMessages(chatJID string, max int) error {
 
 // ClearCache removes only Wamio's derived chat cache, never WhatsApp protocol data.
 func (cs *ChatStore) ClearCache() error {
-	_, err := cs.db.Exec(`DELETE FROM wamio_messages; DELETE FROM wamio_chats;`)
+	_, err := cs.db.Exec(`DELETE FROM wamio_messages; DELETE FROM wamio_chats; DELETE FROM wamio_recent_stickers;`)
 	return err
 }
 

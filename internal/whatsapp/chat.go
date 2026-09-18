@@ -29,6 +29,9 @@ type ChatItem struct {
 	// ArchiveKnown is set once the archive state comes from WhatsApp app state.
 	// It prevents a later history chunk from restoring an older archive value.
 	ArchiveKnown bool `json:"-"`
+	// PinKnown has the same role for the account-level pin state. A history
+	// snapshot can be older than an app-state mutation received during login.
+	PinKnown bool `json:"-"`
 }
 
 // MessageItem represents a single message in a chat conversation
@@ -50,6 +53,9 @@ type MessageItem struct {
 	IsPTT         bool   `json:"isPtt,omitempty"`         // Push-to-talk (voice note)
 	// DeliveryStatus applies only to outgoing messages: sent, delivered, read.
 	DeliveryStatus string `json:"deliveryStatus,omitempty"`
+	// ClientRequestID only exists while the desktop UI reconciles an
+	// optimistic outgoing message with the server-acknowledged message.
+	ClientRequestID string `json:"clientRequestId,omitempty"`
 	// ReplyTo is a snapshot of the quoted message supplied by WhatsApp. Keeping
 	// the snapshot lets replies render even when the referenced page isn't open.
 	ReplyTo     *MessageReference `json:"replyTo,omitempty"`
@@ -62,10 +68,44 @@ type MessageItem struct {
 	Reactions   []MessageReaction `json:"reactions,omitempty"`
 }
 
+// AttachmentDraft is a presentation-safe description of a file that has been
+// copied to Wamio's private staging area. The original filesystem path is
+// deliberately kept server-side.
+type AttachmentDraft struct {
+	ID       string `json:"id"`
+	Kind     string `json:"kind"` // image, video, audio, document
+	FileName string `json:"fileName"`
+	Mimetype string `json:"mimetype"`
+	FileSize uint64 `json:"fileSize"`
+	IsPTT    bool   `json:"isPtt,omitempty"`
+}
+
+// StickerItem is the UI-safe portion of a recently synchronized sticker.
+// Download credentials are never sent to the frontend.
+type StickerItem struct {
+	ID         string `json:"id"`
+	Mimetype   string `json:"mimetype"`
+	Width      uint32 `json:"width"`
+	Height     uint32 `json:"height"`
+	LastUsedAt int64  `json:"lastUsedAt"`
+	Available  bool   `json:"available"`
+}
+
 // CallInfo is the presentation-safe call metadata used by a system call card.
 // It intentionally contains no signaling or media secrets.
 type CallInfo struct {
 	CallID     string `json:"callId"`
+	Outcome    string `json:"outcome"`
+	Duration   int64  `json:"duration,omitempty"`
+	IsVideo    bool   `json:"isVideo"`
+	IsIncoming bool   `json:"isIncoming"`
+}
+
+// CallLogEntry is a presentation-safe entry for the global call-log screen.
+type CallLogEntry struct {
+	ChatJID    string `json:"chatJid"`
+	ChatName   string `json:"chatName"`
+	Timestamp  int64  `json:"timestamp"`
 	Outcome    string `json:"outcome"`
 	Duration   int64  `json:"duration,omitempty"`
 	IsVideo    bool   `json:"isVideo"`
