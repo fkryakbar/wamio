@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -125,13 +126,103 @@ func TestChatStore_GetMessagesBefore(t *testing.T) {
 	})
 }
 
+func TestChatStore_GetMessagesBeforeCursorKeepsSameSecondMessages(t *testing.T) {
+	cs := setupTestChatStore(t)
+	chatJID := "cursor@s.whatsapp.net"
+	for _, row := range []MessageRow{
+		{ID: "a", ChatJID: chatJID, Timestamp: 100, MessageOrder: 10, Content: "same second"},
+		{ID: "b", ChatJID: chatJID, Timestamp: 100, MessageOrder: 20, Content: "same second"},
+		{ID: "c", ChatJID: chatJID, Timestamp: 100, MessageOrder: 20, Content: "same second"},
+		{ID: "d", ChatJID: chatJID, Timestamp: 101, MessageOrder: 1, Content: "newer"},
+	} {
+		if err := cs.UpsertMessage(row); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rows, err := cs.GetMessagesBeforeCursor(chatJID, MessageCursor{Timestamp: 100, Order: 20, MessageID: "c"}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0].ID != "a" || rows[1].ID != "b" {
+		t.Fatalf("expected canonical cursor to return [a b], got %#v", rows)
+	}
+}
+
+func TestChatStore_MarkIncomingMessagesReadOnlyMarksVisibleIDs(t *testing.T) {
+	cs := setupTestChatStore(t)
+	chatJID := "visible@s.whatsapp.net"
+	if err := cs.UpsertChat(ChatRow{JID: chatJID, UnreadCount: 3}); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"visible", "below-fold", "outgoing"} {
+		if err := cs.UpsertMessage(MessageRow{
+			ID: id, ChatJID: chatJID, Timestamp: 100, IsFromMe: id == "outgoing", IsRead: id == "outgoing",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := cs.MarkIncomingMessagesRead(chatJID, []string{"visible", "outgoing"}, 123); err != nil {
+		t.Fatal(err)
+	}
+
+	unread, err := cs.GetUnreadIncomingMessages(chatJID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unread) != 1 || unread[0].ID != "below-fold" {
+		t.Fatalf("expected only below-fold to remain unread, got %#v", unread)
+	}
+	unreadCount, err := cs.GetUnreadIncomingCount(chatJID)
+	if err != nil || unreadCount != 1 {
+		t.Fatalf("durable unread count = %d, err=%v", unreadCount, err)
+	}
+	chats, err := cs.GetAllChats()
+	if err != nil || len(chats) != 1 {
+		t.Fatalf("GetAllChats: rows=%d err=%v", len(chats), err)
+	}
+	if chats[0].UnreadCount != 1 || chats[0].LastReadAt != 123 {
+		t.Fatalf("unexpected read checkpoint: %#v", chats[0])
+	}
+}
+
+func TestChatStore_HistoryFailureBackoffAndReconnectReset(t *testing.T) {
+	cs := setupTestChatStore(t)
+	chatJID := "retry@s.whatsapp.net"
+	if err := cs.UpsertChat(ChatRow{JID: chatJID, LastMessageID: "anchor"}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := cs.SetHistoryFailure(chatJID, "timeout", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := cs.SetHistoryFailure(chatJID, "timeout again", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.RetryAt != 105 || second.RetryAt != 110 || second.FailureCount != 2 {
+		t.Fatalf("unexpected retry schedule: first=%#v second=%#v", first, second)
+	}
+	if err := cs.ResetHistoryRetry(chatJID); err != nil {
+		t.Fatal(err)
+	}
+	reset, err := cs.GetHistoryStatus(chatJID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reset.State != HistoryMoreOnPrimary || reset.RetryAt != 0 || reset.FailureCount != 0 || reset.LastError != "" {
+		t.Fatalf("retry state was not reset: %#v", reset)
+	}
+}
+
 func TestChatStore_MessageContextPreservesThumbnail(t *testing.T) {
 	cs := setupTestChatStore(t)
 	chatJID := "test@s.whatsapp.net"
 	for index := 1; index <= 5; index++ {
 		row := MessageRow{ID: fmt.Sprintf("message-%d", index), ChatJID: chatJID, Timestamp: int64(index * 100), Content: "content"}
 		if index == 3 {
-			row.MediaType, row.Mimetype, row.Thumbnail = "image", "image/jpeg", "thumb-data"
+			row.MediaType, row.Mimetype, row.Thumbnail, row.Waveform = "audio", "audio/ogg; codecs=opus", "thumb-data", []byte{3, 20, 80}
+			row.MediaDuration, row.IsPTT = 12, true
 		}
 		if err := cs.UpsertMessage(row); err != nil {
 			t.Fatalf("UpsertMessage: %v", err)
@@ -146,6 +237,9 @@ func TestChatStore_MessageContextPreservesThumbnail(t *testing.T) {
 	}
 	if context[2].Thumbnail != "thumb-data" {
 		t.Fatalf("thumbnail was not persisted: %#v", context[2])
+	}
+	if !bytes.Equal(context[2].Waveform, []byte{3, 20, 80}) || context[2].MediaDuration != 12 || !context[2].IsPTT {
+		t.Fatalf("voice-note metadata was not persisted: %#v", context[2])
 	}
 }
 

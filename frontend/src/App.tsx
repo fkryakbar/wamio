@@ -8,32 +8,37 @@ import { useAuthStore } from './stores/authStore';
 import { useChatStore } from './stores/chatStore';
 import type { AccountInfo, ConnectionStatusEvent, MessageEvent, ChatUpdateEvent, ChatItem, ChatList, NotificationEvent, InitialSyncEvent, HistoryPageEvent, MessageReceiptEvent, QRCodeEvent, SyncProgressEvent, PresenceEvent, ChatPresenceEvent, MessageReactionEvent, MessageDeleteEvent } from './types';
 import { EventsOn, WindowSetTitle } from '../wailsjs/runtime/runtime';
+import wamioLogo from './assets/images/Wamio.png';
 
 function FullScreenLoading({ text, progress }: { text: string; progress: SyncProgressEvent | null }) {
+  const percentage = progress?.progress != null && progress.progress >= 0 ? Math.min(100, progress.progress) : null;
   return (
-    <div className="app-loading">
-      <div className="app-loading__spinner" />
+    <div className="app-loading" role="status" aria-live="polite">
+      <img className="app-loading__mark" src={wamioLogo} alt="" aria-hidden="true" />
       <p className="app-loading__text">{text}</p>
-      {progress && (
-        <div className="app-loading__progress" aria-live="polite">
-          {progress.progress >= 0 && <div className="app-loading__progress-track"><div className="app-loading__progress-bar" style={{ width: `${Math.min(100, progress.progress)}%` }} /></div>}
-          <span>{progress.preparedChats > 0 ? `${progress.preparedChats} chat terbaru siap dibuka` : `${progress.processedChats} chat diterima`}</span>
+      <div className="app-loading__progress">
+        <div className={`app-loading__progress-track${percentage == null ? ' app-loading__progress-track--indeterminate' : ''}`}>
+          <div className="app-loading__progress-bar" style={percentage == null ? undefined : { width: `${percentage}%` }} />
         </div>
-      )}
+        {progress && (
+          <span>{progress.preparedChats > 0 ? `${progress.preparedChats} chat terbaru siap dibuka` : `${progress.processedChats} chat diterima`}</span>
+        )}
+      </div>
     </div>
   );
 }
 
 function App() {
   const { connectionState, setConnectionState, setQRCode, setUserInfo, setAccountId, setAccounts, setError, clearQRCode, accounts } = useAuthStore();
-  const { setChats, setChatLists, updateChat, addMessage, updateMessageReceipts, updateMessageReactions, removeMessage, initialSyncState, setInitialSyncState, prependMessagesPage, syncProgress, activeRailView } = useChatStore();
+  const { setChats, setChatLists, updateChat, addMessage, updateMessageReceipts, updateMessageReactions, removeMessage, initialSyncState, setInitialSyncState, applyHistoryPage, syncProgress, activeRailView } = useChatStore();
   const [appMode, setAppMode] = useState<'booting' | 'login' | 'linking' | 'switching' | 'workspace'>('booting');
   const [loginMode, setLoginMode] = useState<'initial' | 'add'>('initial');
   const appModeRef = useRef(appMode);
   const typingTimeoutsRef = useRef<Record<string, number>>({});
 	const notificationRef = useRef<Notification | null>(null);
 	const notificationTimerRef = useRef<number | null>(null);
-  const unreadTotal = useChatStore((state) => state.chats.filter((chat) => chat.unreadCount > 0).length);
+  const taskbarRetryRef = useRef<number | null>(null);
+  const unreadTotal = useChatStore((state) => state.chats.reduce((total, chat) => total + Math.max(0, chat.unreadCount), 0));
 
   useEffect(() => { appModeRef.current = appMode; }, [appMode]);
 
@@ -42,6 +47,26 @@ function App() {
     const title = unreadTotal > 0 ? `(${badge}) Wamio` : 'Wamio';
     document.title = title;
     WindowSetTitle(title);
+    if (taskbarRetryRef.current != null) window.clearTimeout(taskbarRetryRef.current);
+    let attempts = 0;
+    let cancelled = false;
+    const updateTaskbarBadge = () => {
+      if (cancelled) return;
+      import('../wailsjs/go/main/App')
+        .then((mod) => mod.SetTaskbarBadge(unreadTotal))
+        .catch((error) => {
+          if (attempts++ < 4) {
+            taskbarRetryRef.current = window.setTimeout(updateTaskbarBadge, 500);
+          } else {
+            console.warn('Taskbar badge tidak dapat diperbarui:', error);
+          }
+        });
+    };
+    updateTaskbarBadge();
+    return () => {
+      cancelled = true;
+      if (taskbarRetryRef.current != null) window.clearTimeout(taskbarRetryRef.current);
+    };
   }, [unreadTotal]);
 
   // Global connection event listener
@@ -194,8 +219,8 @@ function App() {
   // Initial sync lifecycle listener (always subscribed)
   useEffect(() => {
     const cancelInitSync = EventsOn('wa:initial-sync', (data: InitialSyncEvent) => {
-      setInitialSyncState(data.state, data.message);
-      if (data.state !== 'running') {
+      setInitialSyncState(data.uiReady || data.state !== 'running' ? data.state : 'running', data.message);
+      if (data.uiReady || data.state !== 'running') {
         import('../wailsjs/go/whatsapp/WhatsAppService').then((mod) => mod.GetChats()).then((chats: ChatItem[]) => {
           if (chats) setChats(chats);
         }).catch(() => {});
@@ -235,15 +260,11 @@ function App() {
   useEffect(() => {
     const cancelHistoryPage = EventsOn('wa:history-page', (data: HistoryPageEvent) => {
       if (data?.chatJid) {
-        prependMessagesPage(data.chatJid, {
-          messages: data.messages || [],
-          hasMoreLocal: false,
-          canRequestOlder: data.canRequestOlder,
-        });
+        applyHistoryPage(data);
       }
     });
     return () => { cancelHistoryPage(); };
-  }, [prependMessagesPage]);
+  }, [applyHistoryPage]);
 
   // Chat & message event listeners (only when connected)
   useEffect(() => {
@@ -275,11 +296,6 @@ function App() {
     // Listen for new messages
     const cancelMsg = EventsOn('wa:message', (data: MessageEvent) => {
       addMessage(data.chatJid, data.message);
-      if (!data.message.isFromMe && useChatStore.getState().activeChatJID === data.chatJid) {
-        import('../wailsjs/go/whatsapp/WhatsAppService')
-          .then((mod) => mod.OpenChat(data.chatJid))
-          .catch(() => {});
-      }
     });
 
     const cancelReceipt = EventsOn('wa:message-receipt', (data: MessageReceiptEvent) => {
@@ -305,7 +321,7 @@ function App() {
 		notificationRef.current?.close();
 		const notification = new Notification(title, {
           body: data.content,
-          icon: '/wails.png',
+		  icon: wamioLogo,
           silent: false,
         });
 		notificationRef.current = notification;

@@ -1,5 +1,5 @@
 import { useMemo, useState, useEffect, useRef } from "react";
-import { BellOff, Pin, Search, Users } from "lucide-react";
+import { Archive, ArchiveRestore, BellOff, Pin, Search, Users } from "lucide-react";
 import type { ChatItem } from "../types";
 import { useChatStore } from "../stores/chatStore";
 
@@ -69,6 +69,8 @@ interface ChatListItemProps {
   chat: ChatItem;
   isActive: boolean;
   onClick: () => void;
+  archiving: boolean;
+  onToggleArchive: () => void;
 }
 
 function PreviewReceipt({ status }: { status: ChatItem["lastMessageStatus"] }) {
@@ -101,7 +103,7 @@ function PreviewReceipt({ status }: { status: ChatItem["lastMessageStatus"] }) {
   );
 }
 
-function ChatListItem({ chat, isActive, onClick }: ChatListItemProps) {
+function ChatListItem({ chat, isActive, onClick, archiving, onToggleArchive }: ChatListItemProps) {
   const color = useMemo(() => getAvatarColor(chat.name), [chat.name]);
   const initials = useMemo(() => getInitials(chat.name), [chat.name]);
   const itemRef = useRef<HTMLDivElement | null>(null);
@@ -210,6 +212,16 @@ function ChatListItem({ chat, isActive, onClick }: ChatListItemProps) {
               {chat.unreadCount > 99 ? "99+" : chat.unreadCount}
             </span>
           )}
+          <button
+            type="button"
+            className="chat-item__archive-action"
+            disabled={archiving}
+            onClick={(event) => { event.stopPropagation(); onToggleArchive(); }}
+            aria-label={chat.isArchived ? "Keluarkan dari arsip" : "Arsipkan chat"}
+            title={chat.isArchived ? "Keluarkan dari arsip" : "Arsipkan chat"}
+          >
+            {chat.isArchived ? <ArchiveRestore size={16} /> : <Archive size={16} />}
+          </button>
         </div>
       </div>
     </div>
@@ -230,18 +242,55 @@ export function Sidebar() {
     syncProgressCount,
     initialSyncState,
     initialSyncError,
+    syncStartedAt,
+    activeRailView,
+    setActiveRailView,
+    updateChat,
   } = useChatStore();
   const chats = filteredChats();
+  const [syncBannerVisible, setSyncBannerVisible] = useState(true);
+  const [archivePending, setArchivePending] = useState<string | null>(null);
+  const [archiveError, setArchiveError] = useState("");
+
+  useEffect(() => {
+    if (!isSyncing || !syncStartedAt) {
+      setSyncBannerVisible(false);
+      return;
+    }
+    const remaining = syncStartedAt + 60_000 - Date.now();
+    if (remaining <= 0) {
+      setSyncBannerVisible(false);
+      return;
+    }
+    setSyncBannerVisible(true);
+    const timer = window.setTimeout(() => setSyncBannerVisible(false), remaining);
+    return () => window.clearTimeout(timer);
+  }, [isSyncing, syncStartedAt]);
 
   const handleChatClick = (jid: string) => {
     setActiveChat(jid);
+  };
+
+  const toggleArchive = async (chat: ChatItem) => {
+    setArchivePending(chat.jid);
+    setArchiveError("");
+    try {
+      const mod = await import("../../wailsjs/go/whatsapp/WhatsAppService");
+      const updated = await mod.SetChatArchived(chat.jid, !chat.isArchived) as unknown as ChatItem;
+      updateChat(updated);
+      if (activeChatJID === chat.jid) setActiveRailView(updated.isArchived ? "archived" : "chats");
+    } catch {
+      setArchiveError(chat.isArchived ? "Chat gagal dikeluarkan dari arsip." : "Chat gagal diarsipkan.");
+    } finally {
+      setArchivePending(null);
+    }
   };
 
   return (
     <div className="sidebar">
       {/* Header */}
       <div className="sidebar__header">
-        <span className="sidebar__app-name">Wamio</span>
+        <span className="sidebar__app-name">{activeRailView === "archived" ? "Diarsipkan" : "Wamio"}</span>
       </div>
 
       {/* Search */}
@@ -257,19 +306,24 @@ export function Sidebar() {
         </div>
       </div>
 
-		<div className="sidebar__filters" role="tablist" aria-label="Filter chat">
+		{activeRailView !== "archived" && <div className="sidebar__filters" role="tablist" aria-label="Filter chat">
 			{chatLists.map((list) => (
 				<button key={list.id} type="button" role="tab" aria-selected={activeChatListID === list.id}
 					className={activeChatListID === list.id ? 'sidebar__filter sidebar__filter--active' : 'sidebar__filter'}
 					onClick={() => setActiveChatList(list.id)}>{list.name}{list.id === 'unread' && chats.filter((chat) => chat.unreadCount > 0).length ? ` ${chats.filter((chat) => chat.unreadCount > 0).length}` : ''}</button>
 			))}
-		</div>
+		</div>}
 
       {/* Sync indicator */}
-      {isSyncing && (
+      {isSyncing && syncBannerVisible && (
         <div className="sidebar__sync-banner">
           <div className="spinner spinner--sm" />
           <span>Menyinkronkan chat ({syncProgressCount} chat)...</span>
+        </div>
+      )}
+      {archiveError && (
+        <div className="sidebar__sync-banner sidebar__sync-banner--warning">
+          <span>{archiveError}</span>
         </div>
       )}
       {initialSyncState === "degraded" && initialSyncError && (
@@ -300,6 +354,8 @@ export function Sidebar() {
               chat={chat}
               isActive={chat.jid === activeChatJID}
               onClick={() => handleChatClick(chat.jid)}
+              archiving={archivePending === chat.jid}
+              onToggleArchive={() => { void toggleArchive(chat); }}
             />
           ))
         )}

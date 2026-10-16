@@ -4,6 +4,10 @@ import {whatsapp} from '../models';
 
 export function PickAttachments(arg1:string):Promise<Array<whatsapp.AttachmentDraft>>;
 
+export function SetTaskbarBadge(arg1:number):Promise<void>;
+
 export function StageCapturedMedia(arg1:string,arg2:string,arg3:string,arg4:boolean):Promise<whatsapp.AttachmentDraft>;
 
 export function StageDroppedAttachments(arg1:Array<string>):Promise<Array<whatsapp.AttachmentDraft>>;
+
+export function StageVoiceNote(arg1:string,arg2:string,arg3:number,arg4:Array<number>):Promise<whatsapp.AttachmentDraft>;

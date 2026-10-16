@@ -4,6 +4,7 @@ import type { AttachmentDraft, MessageItem, MessageReference, StickerItem } from
 import { useChatStore } from '../stores/chatStore';
 import { AttachmentComposer } from './AttachmentComposer';
 import { StickerPicker } from './StickerPicker';
+import { VoiceRecorder } from './VoiceRecorder';
 
 interface MessageInputProps {
   chatJID: string;
@@ -19,14 +20,10 @@ export function MessageInput({ chatJID, replyTo, onCancelReply }: MessageInputPr
   const [caption, setCaption] = useState('');
   const [cameraOpen, setCameraOpen] = useState(false);
   const [cameraError, setCameraError] = useState('');
-  const [recording, setRecording] = useState(false);
-	const [preparingVoice, setPreparingVoice] = useState(false);
+  const [voiceActive, setVoiceActive] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const cameraVideoRef = useRef<HTMLVideoElement>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
-  const recorderRef = useRef<MediaRecorder | null>(null);
-  const recorderStreamRef = useRef<MediaStream | null>(null);
-  const recorderChunksRef = useRef<Blob[]>([]);
   const { addOptimisticMessage, markOutgoingFailed } = useChatStore();
 
   // Auto-resize textarea
@@ -40,6 +37,7 @@ export function MessageInput({ chatJID, replyTo, onCancelReply }: MessageInputPr
 
   // Focus on chat change
   useEffect(() => {
+    setVoiceActive(false);
     textareaRef.current?.focus();
   }, [chatJID]);
 
@@ -107,56 +105,14 @@ export function MessageInput({ chatJID, replyTo, onCancelReply }: MessageInputPr
     }
   }, [appendDrafts]);
 
-	const stopRecording = useCallback(() => {
-		if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
-	}, []);
-
-  const startRecording = useCallback(async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      recorderStreamRef.current = stream;
-      recorderChunksRef.current = [];
-		const sourceMime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : MediaRecorder.isTypeSupported('audio/ogg;codecs=opus') ? 'audio/ogg;codecs=opus' : '';
-		if (!sourceMime) throw new Error('Browser tidak mendukung perekaman audio');
-      const recorder = new MediaRecorder(stream, { mimeType: sourceMime });
-      recorderRef.current = recorder;
-      recorder.ondataavailable = (event) => { if (event.data.size) recorderChunksRef.current.push(event.data); };
-      recorder.onstop = async () => {
-        stream.getTracks().forEach((track) => track.stop());
-		if (recorderStreamRef.current === stream) recorderStreamRef.current = null;
-		if (recorderRef.current === recorder) recorderRef.current = null;
-        setRecording(false);
-			setPreparingVoice(true);
-			try {
-				const { encodeVoiceNote } = await import('../lib/voiceEncoder');
-				const blob = new Blob(recorderChunksRef.current, { type: sourceMime });
-				const voice = await encodeVoiceNote(blob);
-				const reader = new FileReader();
-				reader.onload = async () => {
-					try {
-						const app = await import('../../wailsjs/go/main/App');
-						const draft = await app.StageCapturedMedia(String(reader.result), `voice-${Date.now()}.ogg`, 'audio', true) as unknown as AttachmentDraft;
-						const clientRequestId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
-						addOptimisticMessage({ id: `local:${clientRequestId}`, clientRequestId, localState: 'pending', draftId: draft.id, chatJid: chatJID, senderJid: '', senderName: 'Anda', content: '', timestamp: Math.floor(Date.now() / 1000), isFromMe: true, isRead: true, mediaType: 'audio', fileName: draft.fileName, mimetype: draft.mimetype, fileSize: draft.fileSize, isPtt: true, deliveryStatus: 'pending' }, 'Pesan suara');
-						setPreparingVoice(false);
-						import('../../wailsjs/go/whatsapp/WhatsAppService')
-							.then((mod) => mod.SendAttachment(chatJID, draft.id, '', clientRequestId))
-							.catch((error) => { console.error('Failed to send voice note:', error); markOutgoingFailed(chatJID, clientRequestId); });
-					} catch { setCameraError('Voice note tidak dapat disiapkan.'); setPreparingVoice(false); }
-				};
-				reader.onerror = () => { setPreparingVoice(false); setCameraError('Voice note tidak dapat dibaca.'); };
-				reader.readAsDataURL(voice);
-			} catch {
-				setPreparingVoice(false);
-				setCameraError('Konversi ke voice note OGG/Opus gagal.');
-			}
-      };
-      recorder.start();
-      setRecording(true);
-    } catch {
-      setCameraError('Mikrofon tidak tersedia atau izin ditolak.');
-    }
-  }, [chatJID, addOptimisticMessage, markOutgoingFailed]);
+  const closeVoice = useCallback(() => setVoiceActive(false), []);
+  const showVoiceError = useCallback((message: string) => setCameraError(message), []);
+  const startRecording = useCallback(() => {
+    setAttachOpen(false);
+    setStickerOpen(false);
+    setCameraError('');
+    setVoiceActive(true);
+  }, []);
 
   const handleSend = useCallback(async () => {
     const trimmed = text.trim();
@@ -248,7 +204,9 @@ export function MessageInput({ chatJID, replyTo, onCancelReply }: MessageInputPr
           <button type="button" className="message-input__reply-close" onClick={onCancelReply} aria-label="Batalkan balasan"><X size={18} /></button>
         </div>
       )}
-      <div className="message-input__container">
+		{voiceActive ? (
+			<VoiceRecorder chatJID={chatJID} onClose={closeVoice} onError={showVoiceError} />
+		) : <div className="message-input__container">
 			<div className="message-input__attach-wrap">
 				<button type="button" className="message-input__icon" onClick={() => setAttachOpen((open) => !open)} aria-label="Tambah lampiran" title="Tambah lampiran"><Paperclip size={21} /></button>
 				{attachOpen && <div className="message-input__attach-menu">
@@ -276,11 +234,10 @@ export function MessageInput({ chatJID, replyTo, onCancelReply }: MessageInputPr
         >
           <Send size={20} />
         </button>
-			<button type="button" className={`message-input__voice ${recording ? 'message-input__voice--recording' : ''}`} onClick={recording ? stopRecording : startRecording} disabled={preparingVoice} aria-label={recording ? 'Selesai merekam voice note' : 'Rekam voice note'} title={recording ? 'Selesai merekam' : 'Rekam voice note'}>{recording ? <span className="message-input__voice-stop" /> : <Mic size={23} />}</button>
-      </div>
+			<button type="button" className="message-input__voice" onClick={startRecording} disabled={drafts.length > 0 || cameraOpen} aria-label="Rekam voice note" title="Rekam voice note"><Mic size={23} /></button>
+      </div>}
 			{drafts.length > 0 && <AttachmentComposer drafts={drafts} caption={caption} onCaptionChange={setCaption} onRemove={(id) => setDrafts((current) => current.filter((draft) => draft.id !== id))} onAddMore={() => pick('media')} onCancel={() => { setDrafts([]); setCaption(''); }} onSend={sendDrafts} />}
 			{cameraOpen && <div className="capture-dialog" role="dialog" aria-label="Ambil foto"><div className="capture-dialog__card"><div className="capture-dialog__header"><strong>Camera</strong><button type="button" onClick={() => setCameraOpen(false)} aria-label="Tutup kamera"><X size={20} /></button></div>{cameraError ? <p>{cameraError}</p> : <video ref={cameraVideoRef} autoPlay playsInline muted />}<div className="capture-dialog__actions"><button type="button" onClick={() => setCameraOpen(false)}>Batal</button><button type="button" className="capture-dialog__take" onClick={capturePhoto} disabled={!!cameraError}>Ambil foto</button></div></div></div>}
-			{(recording || preparingVoice) && <div className="voice-recording" role="status"><span className="voice-recording__dot" />{recording ? 'Merekam voice note…' : 'Menyiapkan voice note OGG/Opus…'} {recording && <button type="button" onClick={stopRecording}>Selesai</button>}</div>}
     </div>
   );
 }

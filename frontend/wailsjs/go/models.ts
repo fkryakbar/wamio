@@ -241,6 +241,8 @@ export namespace whatsapp {
 	    mimetype: string;
 	    fileSize: number;
 	    isPtt?: boolean;
+	    mediaDuration?: number;
+	    waveform?: number[];
 	
 	    static createFrom(source: any = {}) {
 	        return new AttachmentDraft(source);
@@ -254,6 +256,8 @@ export namespace whatsapp {
 	        this.mimetype = source["mimetype"];
 	        this.fileSize = source["fileSize"];
 	        this.isPtt = source["isPtt"];
+	        this.mediaDuration = source["mediaDuration"];
+	        this.waveform = source["waveform"];
 	    }
 	}
 	export class CallInfo {
@@ -429,6 +433,7 @@ export namespace whatsapp {
 	    senderName: string;
 	    content: string;
 	    timestamp: number;
+	    order: number;
 	    isFromMe: boolean;
 	    isRead: boolean;
 	    mediaType?: string;
@@ -437,6 +442,7 @@ export namespace whatsapp {
 	    fileName?: string;
 	    mimetype?: string;
 	    thumbnail?: string;
+	    waveform?: number[];
 	    isPtt?: boolean;
 	    deliveryStatus?: string;
 	    clientRequestId?: string;
@@ -461,6 +467,7 @@ export namespace whatsapp {
 	        this.senderName = source["senderName"];
 	        this.content = source["content"];
 	        this.timestamp = source["timestamp"];
+	        this.order = source["order"];
 	        this.isFromMe = source["isFromMe"];
 	        this.isRead = source["isRead"];
 	        this.mediaType = source["mediaType"];
@@ -469,6 +476,7 @@ export namespace whatsapp {
 	        this.fileName = source["fileName"];
 	        this.mimetype = source["mimetype"];
 	        this.thumbnail = source["thumbnail"];
+	        this.waveform = source["waveform"];
 	        this.isPtt = source["isPtt"];
 	        this.deliveryStatus = source["deliveryStatus"];
 	        this.clientRequestId = source["clientRequestId"];
@@ -564,11 +572,106 @@ export namespace whatsapp {
 	        this.error = source["error"];
 	    }
 	}
+	export class MessageCursor {
+	    timestamp: number;
+	    order: number;
+	    messageId: string;
+	    isFromMe: boolean;
 	
+	    static createFrom(source: any = {}) {
+	        return new MessageCursor(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.timestamp = source["timestamp"];
+	        this.order = source["order"];
+	        this.messageId = source["messageId"];
+	        this.isFromMe = source["isFromMe"];
+	    }
+	}
+	
+	export class MessageLoadProgress {
+	    requestId: string;
+	    mode: string;
+	    phase: string;
+	    loaded: number;
+	    total: number;
+	    percent: number;
+	    state: string;
+	    retryAt?: number;
+	    error?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new MessageLoadProgress(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.requestId = source["requestId"];
+	        this.mode = source["mode"];
+	        this.phase = source["phase"];
+	        this.loaded = source["loaded"];
+	        this.total = source["total"];
+	        this.percent = source["percent"];
+	        this.state = source["state"];
+	        this.retryAt = source["retryAt"];
+	        this.error = source["error"];
+	    }
+	}
+	export class MessageLoadRequest {
+	    requestId: string;
+	    chatJid: string;
+	    mode: string;
+	    limit: number;
+	    cursor?: MessageCursor;
+	    targetMessageId?: string;
+	    forceRetry?: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new MessageLoadRequest(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.requestId = source["requestId"];
+	        this.chatJid = source["chatJid"];
+	        this.mode = source["mode"];
+	        this.limit = source["limit"];
+	        this.cursor = this.convertValues(source["cursor"], MessageCursor);
+	        this.targetMessageId = source["targetMessageId"];
+	        this.forceRetry = source["forceRetry"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class MessagePage {
 	    messages: MessageItem[];
+	    oldestCursor?: MessageCursor;
+	    newestCursor?: MessageCursor;
+	    anchorMessageId?: string;
 	    hasMoreLocal: boolean;
+	    historyState: string;
 	    canRequestOlder: boolean;
+	    requestId?: string;
+	    progress?: MessageLoadProgress;
+	    error?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new MessagePage(source);
@@ -577,8 +680,15 @@ export namespace whatsapp {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.messages = this.convertValues(source["messages"], MessageItem);
+	        this.oldestCursor = this.convertValues(source["oldestCursor"], MessageCursor);
+	        this.newestCursor = this.convertValues(source["newestCursor"], MessageCursor);
+	        this.anchorMessageId = source["anchorMessageId"];
 	        this.hasMoreLocal = source["hasMoreLocal"];
+	        this.historyState = source["historyState"];
 	        this.canRequestOlder = source["canRequestOlder"];
+	        this.requestId = source["requestId"];
+	        this.progress = this.convertValues(source["progress"], MessageLoadProgress);
+	        this.error = source["error"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -601,6 +711,20 @@ export namespace whatsapp {
 	}
 	
 	
+	export class ReadAckResult {
+	    messageIds: string[];
+	    unreadCount: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ReadAckResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.messageIds = source["messageIds"];
+	        this.unreadCount = source["unreadCount"];
+	    }
+	}
 	export class RestoreSessionResult {
 	    attempted: boolean;
 	    accountId?: string;

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { CircleUserRound, LogOut, MessageCircle, PhoneCall, Plus } from "lucide-react";
+import { Archive, CircleUserRound, LogOut, MessageCircle, PhoneCall, Plus } from "lucide-react";
 import { useAuthStore } from "../stores/authStore";
 import { useChatStore } from "../stores/chatStore";
 import type { AccountInfo } from "../types";
@@ -24,7 +24,9 @@ export function AppRail({ accounts, onAddAccount, onSwitchAccount, onLogout }: A
   const menuRef = useRef<HTMLDivElement>(null);
   // WhatsApp's navigation badge counts conversations, not every unread
   // message contained in those conversations.
-  const unreadTotal = chats.filter((chat) => chat.unreadCount > 0).length;
+  const unreadTotal = chats.filter((chat) => !chat.isArchived && chat.unreadCount > 0).length;
+  const archivedChats = chats.filter((chat) => chat.isArchived);
+  const archivedUnread = archivedChats.filter((chat) => chat.unreadCount > 0).length;
   const accountName = userInfo?.pushName || accountId || "Wamio";
 
   useEffect(() => {
@@ -34,6 +36,12 @@ export function AppRail({ accounts, onAddAccount, onSwitchAccount, onLogout }: A
     if (accountMenuOpen) window.addEventListener("mousedown", close);
     return () => window.removeEventListener("mousedown", close);
   }, [accountMenuOpen]);
+
+  useEffect(() => {
+    if (activeRailView === "archived" && archivedChats.length === 0) {
+      setActiveRailView("chats");
+    }
+  }, [activeRailView, archivedChats.length, setActiveRailView]);
 
   const selectAccount = (id: string) => {
     setAccountMenuOpen(false);
@@ -50,6 +58,12 @@ export function AppRail({ accounts, onAddAccount, onSwitchAccount, onLogout }: A
         <button type="button" className={`app-rail__nav ${activeRailView === "calls" ? "app-rail__nav--active" : ""}`} onClick={() => setActiveRailView("calls")} aria-label="Log panggilan" title="Log panggilan">
           <PhoneCall size={24} strokeWidth={2.1} />
         </button>
+        {archivedChats.length > 0 && (
+          <button type="button" className={`app-rail__nav ${activeRailView === "archived" ? "app-rail__nav--active" : ""}`} onClick={() => setActiveRailView("archived")} aria-label="Chat diarsipkan" title="Chat diarsipkan">
+            <Archive size={24} strokeWidth={2.1} />
+            {archivedUnread > 0 && <span className="app-rail__badge">{unreadLabel(archivedUnread)}</span>}
+          </button>
+        )}
       </div>
       <div className="app-rail__bottom" ref={menuRef}>
         <button type="button" className="app-rail__nav" onClick={onLogout} aria-label="Logout" title="Logout"><LogOut size={23} strokeWidth={2.1} /></button>

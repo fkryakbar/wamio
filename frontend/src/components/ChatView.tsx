@@ -9,6 +9,7 @@ import {
 } from "react";
 import { ArrowDown } from "lucide-react";
 import { EventsOn, OnFileDrop, OnFileDropOff } from "../../wailsjs/runtime/runtime";
+import { whatsapp as WailsWhatsApp } from "../../wailsjs/go/models";
 import { useChatStore } from "../stores/chatStore";
 import { MessageInput } from "./MessageInput";
 import { MediaMessage } from "./MediaMessage";
@@ -20,12 +21,32 @@ import { ContactInfoPanel } from "./ContactInfoPanel";
 import type {
   HistoryPageEvent,
   MessageItem,
+  MessageLoadRequest,
   MessagePage,
   MessageReference,
 } from "../types";
+import { isMeaningfullyVisible } from "../lib/messageVisibility";
+import wamioLogo from "../assets/images/Wamio.png";
 
 const QUICK_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
 const REPLY_HISTORY_BATCHES = 5;
+
+function createHistoryRequestID(): string {
+  return typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `history-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function toWailsLoadRequest(request: MessageLoadRequest): WailsWhatsApp.MessageLoadRequest {
+  return new WailsWhatsApp.MessageLoadRequest({
+    ...request,
+    cursor: request.cursor ? new WailsWhatsApp.MessageCursor(request.cursor) : undefined,
+  });
+}
+
+function fromWailsPage(page: WailsWhatsApp.MessagePage): MessagePage {
+  return page as unknown as MessagePage;
+}
 
 function formatMessageTime(timestamp: number): string {
   return timestamp
@@ -369,12 +390,14 @@ export function ChatView() {
     pagination,
     chats,
     setInitialMessages,
+    beginChatOpen,
     prependMessagesPage,
     mergeMessages,
     setLoadingMore,
     presence,
 		retryOutgoing,
 		markOutgoingFailed,
+    applyReadResult,
   } = useChatStore();
   const chat = activeChat();
   const chatMessages = activeChatJID ? messages[activeChatJID] || [] : [];
@@ -390,6 +413,9 @@ export function ChatView() {
   const highlightTimerRef = useRef<number | null>(null);
   const resolvingReplyRef = useRef(false);
   const openedChatRef = useRef<string | null>(null);
+  const visibleReportTimerRef = useRef<number | null>(null);
+  const lastVisibleSignatureRef = useRef("");
+  const openRequestRef = useRef<string | null>(null);
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const [replyTo, setReplyTo] = useState<MessageReference | null>(null);
   const [menu, setMenu] = useState<{
@@ -446,12 +472,20 @@ export function ChatView() {
         anchor.top + (container.scrollHeight - anchor.height);
       prependAnchorRef.current = null;
     } else if (initialBottomPendingRef.current && chatMessages.length > 0) {
-      container.scrollTop = container.scrollHeight;
+      // The local page already contains the requested unread anchor (or the
+      // newest known message). Do not make reopening wait for an optional
+      // background request for older history.
+      if (!activePage || activePage.requestId !== openRequestRef.current) return;
+      const anchorElement = activePage?.anchorMessageId
+        ? messageRefs.current.get(activePage.anchorMessageId)
+        : undefined;
+      if (anchorElement) anchorElement.scrollIntoView({ block: "center" });
+      else container.scrollTop = container.scrollHeight;
       // Keep pinning while the first page is still replacing preloaded data.
       // Once pagination exists, the rendered page is final and normal scroll
       // behavior can resume.
-      initialBottomPendingRef.current = !activePage;
-      isAtBottomRef.current = true;
+      initialBottomPendingRef.current = false;
+      isAtBottomRef.current = !anchorElement;
     } else if (
       chatMessages.length > previousCountRef.current &&
       isAtBottomRef.current
@@ -479,19 +513,35 @@ export function ChatView() {
     return () => {
       if (highlightTimerRef.current)
         window.clearTimeout(highlightTimerRef.current);
+      if (visibleReportTimerRef.current)
+        window.clearTimeout(visibleReportTimerRef.current);
+      lastVisibleSignatureRef.current = "";
     };
   }, [activeChatJID]);
 
   useEffect(() => {
-    if (!activeChatJID || pagination[activeChatJID]) return;
+    if (!activeChatJID) return;
+    const request: MessageLoadRequest = {
+      requestId: createHistoryRequestID(),
+      chatJid: activeChatJID,
+      mode: "initial",
+      limit: 20,
+    };
+    openRequestRef.current = request.requestId;
+    beginChatOpen(activeChatJID, request.requestId);
     import("../../wailsjs/go/whatsapp/WhatsAppService")
       .then((mod) =>
         mod
-          .GetMessagesPage(activeChatJID, 20, 0)
-          .then((page: MessagePage) => setInitialMessages(activeChatJID, page)),
+          .LoadMessagesPage(toWailsLoadRequest(request))
+          .then((page) => {
+            if (openRequestRef.current !== request.requestId) return;
+            setInitialMessages(activeChatJID, fromWailsPage(page));
+          }),
       )
-      .catch(() => {});
-  }, [activeChatJID, pagination, setInitialMessages]);
+      .catch(() => {
+        if (openRequestRef.current === request.requestId) setLoadingMore(activeChatJID, false);
+      });
+  }, [activeChatJID, beginChatOpen, setInitialMessages, setLoadingMore]);
 
   useEffect(() => {
     if (
@@ -506,9 +556,41 @@ export function ChatView() {
       .catch(() => {});
   }, [activeChatJID, pagination]);
 
+  const reportVisibleMessages = useCallback(() => {
+    const container = containerRef.current;
+    if (!container || !activeChatJID || chatMessages.length === 0) return;
+    const bounds = container.getBoundingClientRect();
+    const visible = chatMessages.filter((message) => {
+      const element = messageRefs.current.get(message.id);
+      if (!element) return false;
+      return isMeaningfullyVisible(element.getBoundingClientRect(), bounds);
+    });
+    if (visible.length === 0) return;
+    const anchor = visible[visible.length - 1];
+    const unreadIDs = visible.filter((message) => !message.isFromMe && !message.isRead).map((message) => message.id);
+    const signature = `${activeChatJID}:${anchor.id}:${unreadIDs.join(",")}`;
+    if (lastVisibleSignatureRef.current === signature) return;
+    lastVisibleSignatureRef.current = signature;
+    import("../../wailsjs/go/whatsapp/WhatsAppService")
+      .then((mod) => mod.MarkVisibleMessagesRead(activeChatJID, unreadIDs, new WailsWhatsApp.MessageCursor({
+        timestamp: anchor.timestamp,
+        order: anchor.order || 0,
+        messageId: anchor.id,
+        isFromMe: anchor.isFromMe,
+      })))
+      .then((result) => applyReadResult(activeChatJID, result))
+      .catch(() => { lastVisibleSignatureRef.current = ""; });
+  }, [activeChatJID, applyReadResult, chatMessages]);
+
+  const scheduleVisibleReport = useCallback(() => {
+    if (visibleReportTimerRef.current) window.clearTimeout(visibleReportTimerRef.current);
+    visibleReportTimerRef.current = window.setTimeout(reportVisibleMessages, 120);
+  }, [reportVisibleMessages]);
+
   const onScroll = useCallback(() => {
     const container = containerRef.current;
     if (!container || !activeChatJID) return;
+    scheduleVisibleReport();
     const distance =
       container.scrollHeight - container.scrollTop - container.clientHeight;
     isAtBottomRef.current = distance < 80;
@@ -516,44 +598,34 @@ export function ChatView() {
     if (container.scrollTop > 80) return;
     const page = pagination[activeChatJID];
     const oldest = chatMessages[0];
-    if (!page || page.loadingMore || !oldest) return;
+    if (!page || page.loadingMore || !oldest || (!page.hasMoreLocal && !page.canRequestOlder)) return;
     prependAnchorRef.current = {
       height: container.scrollHeight,
       top: container.scrollTop,
     };
     setLoadingMore(activeChatJID, true);
+    const request: MessageLoadRequest = {
+      requestId: createHistoryRequestID(),
+      chatJid: activeChatJID,
+      mode: "before",
+      limit: 50,
+      cursor: page.oldestCursor || {
+        timestamp: oldest.timestamp,
+        order: oldest.order || 0,
+        messageId: oldest.id,
+        isFromMe: oldest.isFromMe,
+      },
+    };
     import("../../wailsjs/go/whatsapp/WhatsAppService")
-      .then((mod) => {
-        if (page.hasMoreLocal)
-          return mod
-            .GetMessagesPage(activeChatJID, 50, page.oldestTimestampLoaded)
-            .then((result: MessagePage) => {
-              prependMessagesPage(activeChatJID, result);
-              if (!result.messages.length && result.canRequestOlder)
-                return mod.RequestOlderMessages(
-                  activeChatJID,
-                  oldest.id,
-                  oldest.isFromMe,
-                  oldest.timestamp,
-                  50,
-                );
-            });
-        if (page.canRequestOlder)
-          return mod.RequestOlderMessages(
-            activeChatJID,
-            oldest.id,
-            oldest.isFromMe,
-            oldest.timestamp,
-            50,
-          );
-      })
-      .catch(() => {})
-      .finally(() => setLoadingMore(activeChatJID, false));
+      .then((mod) => mod.LoadMessagesPage(toWailsLoadRequest(request)))
+      .then((result) => prependMessagesPage(activeChatJID, fromWailsPage(result)))
+      .catch(() => setLoadingMore(activeChatJID, false));
   }, [
     activeChatJID,
     chatMessages,
     pagination,
     prependMessagesPage,
+    scheduleVisibleReport,
     setLoadingMore,
   ]);
 
@@ -563,6 +635,18 @@ export function ChatView() {
     container.addEventListener("scroll", onScroll, { passive: true });
     return () => container.removeEventListener("scroll", onScroll);
   }, [onScroll]);
+
+  useEffect(() => {
+    scheduleVisibleReport();
+  }, [chatMessages.length, activeChatJID, scheduleVisibleReport]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || !("ResizeObserver" in window)) return;
+    const observer = new ResizeObserver(scheduleVisibleReport);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [scheduleVisibleReport]);
 
   useEffect(() => {
     OnFileDrop((_x, _y, paths) => {
@@ -678,11 +762,11 @@ export function ChatView() {
     setNotice("Mencari pesan asli...");
     try {
       const mod = await import("../../wailsjs/go/whatsapp/WhatsAppService");
-      const local = (await mod.GetMessagesAround(
+      const local = fromWailsPage(await mod.GetMessagesAround(
         activeChatJID,
         reference.id,
         25,
-      )) as MessagePage;
+      ));
       if (local.messages?.some((message) => message.id === reference.id)) {
         pendingRevealRef.current = reference.id;
         mergeMessages(activeChatJID, local.messages);
@@ -694,11 +778,12 @@ export function ChatView() {
         const page = state.pagination[activeChatJID];
         const oldest = state.messages[activeChatJID]?.[0];
         if (!page?.canRequestOlder || !oldest) break;
+        const requestId = createHistoryRequestID();
         const history = await new Promise<HistoryPageEvent>((resolve) => {
           const cancel = EventsOn(
             "wa:history-page",
             (event: HistoryPageEvent) => {
-              if (event.chatJid !== activeChatJID) return;
+              if (event.chatJid !== activeChatJID || event.requestId !== requestId) return;
               window.clearTimeout(timer);
               cancel();
               resolve(event);
@@ -708,25 +793,36 @@ export function ChatView() {
             cancel();
             resolve({
               chatJid: activeChatJID,
+              requestId,
+              mode: "before",
               messages: [],
+              historyState: "retryable_failure",
               canRequestOlder: false,
               error: "Waktu permintaan habis.",
             });
           }, 31000);
           mod
-            .RequestOlderMessages(
-              activeChatJID,
-              oldest.id,
-              oldest.isFromMe,
-              oldest.timestamp,
-              50,
-            )
+            .RequestOlderMessagesPage(toWailsLoadRequest({
+              requestId,
+              chatJid: activeChatJID,
+              mode: "before",
+              limit: 50,
+              cursor: page.oldestCursor || {
+                timestamp: oldest.timestamp,
+                order: oldest.order || 0,
+                messageId: oldest.id,
+                isFromMe: oldest.isFromMe,
+              },
+            }))
             .catch(() => {
               window.clearTimeout(timer);
               cancel();
               resolve({
                 chatJid: activeChatJID,
+                requestId,
+                mode: "before",
                 messages: [],
+                historyState: "retryable_failure",
                 canRequestOlder: false,
                 error: "Riwayat lama tidak tersedia.",
               });
@@ -784,6 +880,34 @@ export function ChatView() {
   };
 
   const page = activePage;
+  const retryHistoryLoad = async () => {
+    if (!activeChatJID || !page) return;
+    const oldest = chatMessages[0];
+    const mode = page.progress?.mode || (chatMessages.length ? "before" : "initial");
+    const request: MessageLoadRequest = {
+      requestId: createHistoryRequestID(),
+      chatJid: activeChatJID,
+      mode,
+      limit: mode === "before" ? 50 : 20,
+      forceRetry: true,
+      cursor: page.oldestCursor || (oldest ? {
+        timestamp: oldest.timestamp,
+        order: oldest.order || 0,
+        messageId: oldest.id,
+        isFromMe: oldest.isFromMe,
+      } : undefined),
+    };
+    setLoadingMore(activeChatJID, true);
+    try {
+      const mod = await import("../../wailsjs/go/whatsapp/WhatsAppService");
+      const result = fromWailsPage(await mod.LoadMessagesPage(toWailsLoadRequest(request)));
+      if (mode === "initial") setInitialMessages(activeChatJID, result);
+      else prependMessagesPage(activeChatJID, result);
+    } catch {
+      setLoadingMore(activeChatJID, false);
+    }
+  };
+  const initialLoading = !page || (page.progress?.mode === "initial" && ["local", "remote", "merge"].includes(page.progress.phase));
   const chatPresence = activeChatJID ? presence[activeChatJID] : undefined;
   const headerStatus = chat?.isGroup
     ? "Grup"
@@ -800,6 +924,7 @@ export function ChatView() {
     return (
       <div className="chatview chatview--empty">
         <div className="chatview__welcome">
+          <img src={wamioLogo} alt="" aria-hidden="true" />
           <h2>Wamio</h2>
           <p>Pilih chat untuk mulai berkirim pesan</p>
         </div>
@@ -836,11 +961,29 @@ export function ChatView() {
         </button>
       </div>
       <div className="chatview__messages-wrap">
+      {initialLoading && (
+        <div className="chatview__initial-loading" role="status" aria-live="polite">
+          <div className="chatview__initial-mark" aria-hidden="true">W</div>
+          <span>Memuat pesan</span>
+          <div className="chatview__progress-track">
+            <div className="chatview__progress-bar" style={{ width: `${page?.progress?.percent || 0}%` }} />
+          </div>
+          <small>{page?.progress ? `${page.progress.loaded}/${page.progress.total} pesan` : "Menyiapkan percakapan..."}</small>
+        </div>
+      )}
+      {page?.error && !initialLoading && (
+        <div className="chatview__history-error" role="alert">
+          <span>{page.error}</span>
+          <button type="button" onClick={() => void retryHistoryLoad()}>Coba lagi</button>
+        </div>
+      )}
       <div className="chatview__messages" ref={containerRef}>
-        {page?.loadingMore && (
+        {page?.loadingMore && page.progress?.mode === "before" && (
           <div className="chatview__loading-more">
-            <div className="chatview__loading-spinner" />
-            <span>Memuat pesan lama...</span>
+            <div className="chatview__loading-progress">
+              <div className="chatview__loading-progress-bar" style={{ width: `${page.progress.percent}%` }} />
+            </div>
+            <span>Memuat pesan lama {page.progress.loaded}/{page.progress.total}</span>
           </div>
         )}
         <div className="chatview__messages-inner">

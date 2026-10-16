@@ -3,9 +3,11 @@ module whatsapp-desktop
 go 1.26.0
 
 require (
+	github.com/go-ole/go-ole v1.3.0
 	github.com/ncruces/go-sqlite3 v0.34.0
 	github.com/wailsapp/wails/v2 v2.14.0
 	go.mau.fi/whatsmeow v0.0.0-20260915211301-f376da267f95
+	golang.org/x/sys v0.47.0
 	google.golang.org/protobuf v1.36.12
 )
 
@@ -16,7 +18,6 @@ require (
 	github.com/bep/debounce v1.2.1 // indirect
 	github.com/coder/websocket v1.8.15 // indirect
 	github.com/elliotchance/orderedmap/v3 v3.1.0 // indirect
-	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
@@ -49,7 +50,6 @@ require (
 	golang.org/x/exp v0.0.0-20260813180055-c1d0aacb2297 // indirect
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 )
 

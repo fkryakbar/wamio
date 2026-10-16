@@ -1,6 +1,8 @@
 package whatsapp
 
 import (
+	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -10,6 +12,8 @@ import (
 	waWeb "go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
+
+	"whatsapp-desktop/internal/store"
 )
 
 func TestNewWhatsAppService(t *testing.T) {
@@ -84,6 +88,9 @@ func TestDisconnect_NoClient(t *testing.T) {
 }
 
 func TestLogout_NoClient(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("APPDATA", configDir)
+	t.Setenv("LOCALAPPDATA", configDir)
 	svc := NewWhatsAppService()
 
 	// Should not panic when no client
@@ -145,6 +152,124 @@ func TestGetMessagesPage_NoCursor(t *testing.T) {
 	}
 }
 
+func setupServiceChatStore(t *testing.T) *WhatsAppService {
+	t.Helper()
+	database, err := store.NewDatabase(filepath.Join(t.TempDir(), "service-chat.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	chatStore, err := store.NewChatStore(database.GetSQLDB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewWhatsAppService()
+	service.chatStore = chatStore
+	return service
+}
+
+func TestLoadMessagesPageUsesLimitPlusOne(t *testing.T) {
+	service := setupServiceChatStore(t)
+	chatJID := "page@s.whatsapp.net"
+	if err := service.chatStore.UpsertChat(store.ChatRow{JID: chatJID, HistoryState: store.HistoryExhausted}); err != nil {
+		t.Fatal(err)
+	}
+	for index := 1; index <= 20; index++ {
+		if err := service.chatStore.UpsertMessage(store.MessageRow{ID: fmt.Sprintf("message-%02d", index), ChatJID: chatJID, Timestamp: int64(index), IsFromMe: true, IsRead: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page := service.LoadMessagesPage(MessageLoadRequest{RequestID: "exact", ChatJID: chatJID, Mode: "initial", Limit: 20})
+	if page.HasMoreLocal || len(page.Messages) != 20 {
+		t.Fatalf("exact page should be terminal locally: count=%d hasMore=%v", len(page.Messages), page.HasMoreLocal)
+	}
+	if err := service.chatStore.UpsertMessage(store.MessageRow{ID: "message-00", ChatJID: chatJID, Timestamp: 0, IsFromMe: true, IsRead: true}); err != nil {
+		t.Fatal(err)
+	}
+	page = service.LoadMessagesPage(MessageLoadRequest{RequestID: "extra", ChatJID: chatJID, Mode: "initial", Limit: 20})
+	if !page.HasMoreLocal || len(page.Messages) != 20 {
+		t.Fatalf("row limit+1 should expose another local page: count=%d hasMore=%v", len(page.Messages), page.HasMoreLocal)
+	}
+}
+
+func TestLoadMessagesPagePrioritizesFirstUnreadOverLastOpened(t *testing.T) {
+	service := setupServiceChatStore(t)
+	chatJID := "unread-anchor@s.whatsapp.net"
+	if err := service.chatStore.UpsertChat(store.ChatRow{JID: chatJID, HistoryState: store.HistoryExhausted}); err != nil {
+		t.Fatal(err)
+	}
+	for index := 1; index <= 30; index++ {
+		if err := service.chatStore.UpsertMessage(store.MessageRow{
+			ID: fmt.Sprintf("message-%02d", index), ChatJID: chatJID,
+			SenderJID: chatJID, Timestamp: int64(index), MessageOrder: uint64(index),
+			IsRead: index != 12,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := service.chatStore.SetLastOpened(chatJID, store.MessageCursor{
+		Timestamp: 25, Order: 25, MessageID: "message-25",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	page := service.LoadMessagesPage(MessageLoadRequest{
+		RequestID: "reopen", ChatJID: chatJID, Mode: "initial", Limit: 10,
+	})
+	if page.AnchorMessageID != "message-12" {
+		t.Fatalf("anchor = %q, want first unread message", page.AnchorMessageID)
+	}
+	if !containsMessageID(func() []string {
+		ids := make([]string, 0, len(page.Messages))
+		for _, item := range page.Messages {
+			ids = append(ids, item.ID)
+		}
+		return ids
+	}(), "message-12") {
+		t.Fatalf("unread anchor is not present in page: %#v", page.Messages)
+	}
+}
+
+func TestLoadMessagesPageUsesNewestPageWhenEverythingIsRead(t *testing.T) {
+	service := setupServiceChatStore(t)
+	chatJID := "read-chat@s.whatsapp.net"
+	if err := service.chatStore.UpsertChat(store.ChatRow{JID: chatJID, HistoryState: store.HistoryExhausted}); err != nil {
+		t.Fatal(err)
+	}
+	for index := 1; index <= 15; index++ {
+		if err := service.chatStore.UpsertMessage(store.MessageRow{
+			ID: fmt.Sprintf("message-%02d", index), ChatJID: chatJID,
+			SenderJID: chatJID, Timestamp: int64(index), MessageOrder: uint64(index), IsRead: true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page := service.LoadMessagesPage(MessageLoadRequest{
+		RequestID: "reopen-read", ChatJID: chatJID, Mode: "initial", Limit: 10,
+	})
+	if page.AnchorMessageID != "" {
+		t.Fatalf("read chat unexpectedly returned anchor %q", page.AnchorMessageID)
+	}
+	if len(page.Messages) != 10 || page.Messages[len(page.Messages)-1].ID != "message-15" {
+		t.Fatalf("read chat did not return newest page: %#v", page.Messages)
+	}
+}
+
+func TestRemoteHistoryCursorFallsBackToDurableChatAnchor(t *testing.T) {
+	service := setupServiceChatStore(t)
+	chatJID := "outside-preload@s.whatsapp.net"
+	if err := service.chatStore.UpsertChat(store.ChatRow{
+		JID: chatJID, LastMessageID: "durable-anchor", LastMessageTime: 1234,
+		LastMessageOrder: 42, LastMessageFromMe: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cursor := service.remoteHistoryCursor(chatJID, nil, nil)
+	if cursor == nil || cursor.MessageID != "durable-anchor" || cursor.Timestamp != 1234 || cursor.Order != 42 || !cursor.IsFromMe {
+		t.Fatalf("durable anchor was not selected: %#v", cursor)
+	}
+}
+
 func TestFindInitialConversationAliasUsesConversationIdentity(t *testing.T) {
 	svc := NewWhatsAppService()
 	jid := types.NewJID("628123456789", types.DefaultUserServer)
@@ -183,6 +308,27 @@ func TestSplitInitialPreloadAcceptsShortHistory(t *testing.T) {
 	foreground, background := splitInitialPreload(conversations)
 	if len(foreground) != 3 || len(background) != 0 {
 		t.Fatalf("short history split = %d foreground, %d background", len(foreground), len(background))
+	}
+}
+
+func TestInitialHistoryChunkKeyDistinguishesZeroOrderPayloads(t *testing.T) {
+	first := &waHistorySync.HistorySync{
+		SyncType:      waHistorySync.HistorySync_RECENT.Enum(),
+		ChunkOrder:    proto.Uint32(0),
+		Progress:      proto.Uint32(50),
+		Conversations: []*waHistorySync.Conversation{{ID: proto.String("first@s.whatsapp.net")}},
+	}
+	second := proto.Clone(first).(*waHistorySync.HistorySync)
+	second.Conversations[0].ID = proto.String("second@s.whatsapp.net")
+
+	firstKey := initialHistoryChunkKey(1, "", waHistorySync.HistorySync_RECENT, 0, first)
+	duplicateKey := initialHistoryChunkKey(1, "", waHistorySync.HistorySync_RECENT, 0, proto.Clone(first).(*waHistorySync.HistorySync))
+	secondKey := initialHistoryChunkKey(1, "", waHistorySync.HistorySync_RECENT, 0, second)
+	if firstKey != duplicateKey {
+		t.Fatalf("identical retry payload should have a stable key: %q != %q", firstKey, duplicateKey)
+	}
+	if firstKey == secondKey {
+		t.Fatalf("distinct zero-order chunks must not collapse to one key: %q", firstKey)
 	}
 }
 

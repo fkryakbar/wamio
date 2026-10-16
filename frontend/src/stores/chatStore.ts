@@ -1,17 +1,24 @@
 import { create } from 'zustand';
-import type { ChatItem, MessageItem, MessagePage, PresenceEvent, ChatPresenceEvent, SyncProgressEvent, MessageReaction, ChatList } from '../types';
+import type { ChatItem, MessageItem, MessagePage, MessageCursor, MessageLoadProgress, HistoryState, HistoryPageEvent, PresenceEvent, ChatPresenceEvent, SyncProgressEvent, MessageReaction, ChatList, ReadAckResult } from '../types';
+
+export type RailView = 'chats' | 'calls' | 'archived';
 
 interface PaginationMeta {
-  oldestTimestampLoaded: number;
+  oldestCursor?: MessageCursor;
+  anchorMessageId?: string;
   hasMoreLocal: boolean;
   canRequestOlder: boolean;
   loadingMore: boolean;
+  historyState: HistoryState;
+  requestId?: string;
+  progress?: MessageLoadProgress;
+  error?: string;
 }
 
 interface ChatState {
   // State
   chats: ChatItem[];
-	activeRailView: 'chats' | 'calls';
+	activeRailView: RailView;
 	chatLists: ChatList[];
 	activeChatListID: string;
   activeChatJID: string | null;
@@ -23,11 +30,12 @@ interface ChatState {
   pagination: Record<string, PaginationMeta>;
   syncProgressCount: number;
   syncProgress: SyncProgressEvent | null;
+  syncStartedAt: number | null;
   presence: Record<string, PresenceEvent & { typing: boolean }>;
 
   // Actions
   setChats: (chats: ChatItem[]) => void;
-	setActiveRailView: (view: 'chats' | 'calls') => void;
+	setActiveRailView: (view: RailView) => void;
 	setChatLists: (lists: ChatList[]) => void;
 	setActiveChatList: (id: string) => void;
   updateChat: (chat: ChatItem) => void;
@@ -42,7 +50,9 @@ interface ChatState {
   setMessages: (chatJid: string, messages: MessageItem[]) => void;
   mergeMessages: (chatJid: string, messages: MessageItem[]) => void;
   setInitialMessages: (chatJid: string, page: MessagePage) => void;
+  beginChatOpen: (chatJid: string, requestId: string) => void;
   prependMessagesPage: (chatJid: string, page: MessagePage) => void;
+  applyHistoryPage: (event: HistoryPageEvent) => void;
   setSearchQuery: (query: string) => void;
   setSyncing: (syncing: boolean) => void;
   setInitialSyncState: (state: 'running' | 'ready' | 'degraded', error?: string) => void;
@@ -52,6 +62,7 @@ interface ChatState {
   setSyncProgress: (progress: SyncProgressEvent) => void;
   setPresence: (presence: PresenceEvent) => void;
   setChatPresence: (presence: ChatPresenceEvent) => void;
+  applyReadResult: (chatJid: string, result: ReadAckResult) => void;
   reset: () => void;
 
   // Computed
@@ -84,6 +95,32 @@ function keepNewestDeliveryStatus(existing: MessageItem | undefined, incoming: M
   };
 }
 
+export function compareMessages(first: MessageItem, second: MessageItem): number {
+  if (first.timestamp !== second.timestamp) return first.timestamp - second.timestamp;
+  const orderDifference = (first.order || 0) - (second.order || 0);
+  if (orderDifference !== 0) return orderDifference;
+  return first.id.localeCompare(second.id);
+}
+
+export function mergeMessageLists(existing: MessageItem[], incoming: MessageItem[]): MessageItem[] {
+  const byID = new Map<string, MessageItem>();
+  const optimisticByRequest = new Map<string, string>();
+  for (const message of existing) {
+    if (message.id) byID.set(message.id, message);
+    if (message.clientRequestId) optimisticByRequest.set(message.clientRequestId, message.id);
+  }
+  for (const message of incoming) {
+    const optimisticID = message.clientRequestId ? optimisticByRequest.get(message.clientRequestId) : undefined;
+    const key = optimisticID || message.id;
+    if (!key) continue;
+    const previous = byID.get(key);
+    const merged = keepNewestDeliveryStatus(previous, { ...previous, ...message });
+    if (optimisticID && optimisticID !== message.id) byID.delete(optimisticID);
+    byID.set(message.id || key, merged);
+  }
+  return Array.from(byID.values()).sort(compareMessages);
+}
+
 function isSamePreview(first: ChatItem, second: ChatItem): boolean {
   return first.lastMessageTime === second.lastMessageTime &&
     first.lastMessage === second.lastMessage &&
@@ -106,6 +143,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   pagination: {},
   syncProgressCount: 0,
   syncProgress: null,
+  syncStartedAt: Date.now(),
   presence: {},
 
   setChats: (incoming) =>
@@ -143,7 +181,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         newChats.unshift(chat);
       }
 	      sortChats(newChats);
-      return { chats: newChats };
+      const activeRailView = state.activeChatJID === chat.jid && state.activeRailView !== 'calls'
+        ? (chat.isArchived ? 'archived' : 'chats')
+        : state.activeRailView;
+      return { chats: newChats, activeRailView };
     }),
 
   setActiveChat: (jid) => set({ activeChatJID: jid }),
@@ -154,29 +195,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   addMessage: (chatJid, message) =>
     set((state) => {
       const existing = state.messages[chatJid] || [];
-			const optimisticIndex = message.clientRequestId
-				? existing.findIndex((item) => item.clientRequestId === message.clientRequestId)
-				: -1;
-			if (optimisticIndex >= 0) {
-				const next = [...existing];
-				next[optimisticIndex] = message;
-				return { messages: { ...state.messages, [chatJid]: next } };
-			}
-      if (
-        existing.some(
-          (m) =>
-            (m.id && m.id === message.id) ||
-            (m.timestamp === message.timestamp &&
-              m.content === message.content &&
-              m.isFromMe === message.isFromMe)
-        )
-      ) {
-        return state;
-      }
       return {
         messages: {
           ...state.messages,
-          [chatJid]: [...existing, message],
+          [chatJid]: mergeMessageLists(existing, [message]),
         },
       };
     }),
@@ -194,7 +216,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
         : chat);
       return {
-        messages: { ...state.messages, [message.chatJid]: [...existing, message] },
+        messages: { ...state.messages, [message.chatJid]: mergeMessageLists(existing, [message]) },
         chats: sortChats(chats),
       };
     }),
@@ -273,44 +295,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   setMessages: (chatJid, messages) =>
     set((state) => {
-      const existing = new Map((state.messages[chatJid] || []).map((message) => [message.id, message]));
-      const seen = new Set<string>();
-      const deduped = messages.filter((m) => {
-        const key = m.id || `${m.timestamp}-${m.content}-${m.isFromMe}`;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
       return {
         messages: {
           ...state.messages,
-          [chatJid]: deduped.map((message) => keepNewestDeliveryStatus(existing.get(message.id), message)),
+          [chatJid]: mergeMessageLists([], messages).map((message) =>
+            keepNewestDeliveryStatus((state.messages[chatJid] || []).find((item) => item.id === message.id), message)),
         },
       };
     }),
 
   mergeMessages: (chatJid, incoming) =>
     set((state) => {
-      const byID = new Map<string, MessageItem>();
-      for (const message of state.messages[chatJid] || []) byID.set(message.id, message);
-      for (const message of incoming) {
-        const previous = byID.get(message.id);
-        byID.set(message.id, keepNewestDeliveryStatus(previous, { ...previous, ...message }));
-      }
-      const merged = Array.from(byID.values()).sort((first, second) =>
-        first.timestamp === second.timestamp ? first.id.localeCompare(second.id) : first.timestamp - second.timestamp
-      );
-      const oldest = merged[0]?.timestamp ?? state.pagination[chatJid]?.oldestTimestampLoaded ?? 0;
+      const merged = mergeMessageLists(state.messages[chatJid] || [], incoming);
+      const oldest = merged[0];
       return {
         messages: { ...state.messages, [chatJid]: merged },
         pagination: {
           ...state.pagination,
           [chatJid]: {
             ...state.pagination[chatJid],
-            oldestTimestampLoaded: oldest,
+            oldestCursor: oldest ? { timestamp: oldest.timestamp, order: oldest.order || 0, messageId: oldest.id, isFromMe: oldest.isFromMe } : state.pagination[chatJid]?.oldestCursor,
             hasMoreLocal: state.pagination[chatJid]?.hasMoreLocal ?? false,
             canRequestOlder: state.pagination[chatJid]?.canRequestOlder ?? false,
             loadingMore: state.pagination[chatJid]?.loadingMore ?? false,
+            historyState: state.pagination[chatJid]?.historyState ?? 'unknown',
           },
         },
       };
@@ -318,57 +326,50 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   setInitialMessages: (chatJid, page) =>
     set((state) => {
-      const msgs = page.messages;
-      const existing = new Map((state.messages[chatJid] || []).map((message) => [message.id, message]));
-      const seen = new Set<string>();
-      const deduped = msgs.filter((m) => {
-        const key = m.id || `${m.timestamp}-${m.content}-${m.isFromMe}`;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
-      const oldest = deduped[0]?.timestamp ?? 0;
+      const merged = mergeMessageLists([], page.messages);
       return {
         messages: {
           ...state.messages,
-          [chatJid]: deduped.map((message) => keepNewestDeliveryStatus(existing.get(message.id), message)),
+          [chatJid]: merged,
         },
         pagination: {
           ...state.pagination,
           [chatJid]: {
-            oldestTimestampLoaded: oldest,
+            oldestCursor: page.oldestCursor,
+            anchorMessageId: page.anchorMessageId,
             hasMoreLocal: page.hasMoreLocal,
             canRequestOlder: page.canRequestOlder,
-            loadingMore: false,
+            loadingMore: page.progress?.phase === 'remote',
+            historyState: page.historyState,
+            requestId: page.requestId,
+            progress: page.progress,
+            error: page.error,
           },
         },
       };
     }),
 
+  beginChatOpen: (chatJid, requestId) =>
+    set((state) => ({
+      pagination: {
+        ...state.pagination,
+        [chatJid]: {
+          ...state.pagination[chatJid],
+          anchorMessageId: undefined,
+          hasMoreLocal: state.pagination[chatJid]?.hasMoreLocal ?? false,
+          canRequestOlder: state.pagination[chatJid]?.canRequestOlder ?? false,
+          loadingMore: true,
+          historyState: state.pagination[chatJid]?.historyState ?? 'unknown',
+          requestId,
+          error: undefined,
+        },
+      },
+    })),
+
   prependMessagesPage: (chatJid, pageResult) =>
     set((state) => {
-      const msgs = pageResult.messages;
       const existing = state.messages[chatJid] || [];
-      const existingIds = new Set(existing.map((m) => m.id).filter(Boolean));
-      const newMsgs = msgs.filter((m) => !existingIds.has(m.id));
-      if (newMsgs.length === 0) {
-        const page = state.pagination[chatJid];
-        return {
-          pagination: {
-            ...state.pagination,
-            [chatJid]: {
-              oldestTimestampLoaded: page?.oldestTimestampLoaded ?? 0,
-              hasMoreLocal: pageResult.hasMoreLocal,
-              canRequestOlder: pageResult.canRequestOlder,
-              loadingMore: false,
-            },
-          },
-        };
-      }
-
-      const merged = [...newMsgs, ...existing];
-      const page = state.pagination[chatJid];
-      const oldest = newMsgs[0]?.timestamp ?? page?.oldestTimestampLoaded ?? 0;
+      const merged = mergeMessageLists(existing, pageResult.messages);
 
       return {
         messages: {
@@ -378,10 +379,39 @@ export const useChatStore = create<ChatState>((set, get) => ({
         pagination: {
           ...state.pagination,
           [chatJid]: {
-            oldestTimestampLoaded: oldest,
+            oldestCursor: pageResult.oldestCursor || state.pagination[chatJid]?.oldestCursor,
+            anchorMessageId: state.pagination[chatJid]?.anchorMessageId,
             hasMoreLocal: pageResult.hasMoreLocal,
             canRequestOlder: pageResult.canRequestOlder,
-            loadingMore: false,
+            loadingMore: pageResult.progress?.phase === 'remote',
+            historyState: pageResult.historyState,
+            requestId: pageResult.requestId || state.pagination[chatJid]?.requestId,
+            progress: pageResult.progress,
+            error: pageResult.error,
+          },
+        },
+      };
+    }),
+
+  applyHistoryPage: (event) =>
+    set((state) => {
+      const current = state.pagination[event.chatJid];
+      if (event.requestId && current?.requestId && event.requestId !== current.requestId) return state;
+      const merged = mergeMessageLists(state.messages[event.chatJid] || [], event.messages || []);
+      return {
+        messages: { ...state.messages, [event.chatJid]: merged },
+        pagination: {
+          ...state.pagination,
+          [event.chatJid]: {
+            oldestCursor: event.oldestCursor || current?.oldestCursor,
+            anchorMessageId: current?.anchorMessageId,
+            hasMoreLocal: false,
+            canRequestOlder: event.canRequestOlder,
+            loadingMore: event.progress?.phase === 'remote' || event.progress?.phase === 'merge',
+            historyState: event.historyState,
+            requestId: event.requestId || current?.requestId,
+            progress: event.progress,
+            error: event.error,
           },
         },
       };
@@ -389,7 +419,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   setSearchQuery: (query) => set({ searchQuery: query }),
 
-  setSyncing: (syncing) => set({ isSyncing: syncing }),
+  setSyncing: (syncing) => set((state) => ({
+    isSyncing: syncing,
+    syncStartedAt: syncing ? (state.isSyncing && state.syncStartedAt ? state.syncStartedAt : Date.now()) : null,
+  })),
 
   setInitialSyncState: (state, error = '') => set({ initialSyncState: state, initialSyncError: error }),
 
@@ -399,10 +432,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
         ...state.pagination,
         [chatJid]: {
           ...state.pagination[chatJid],
-          oldestTimestampLoaded: state.pagination[chatJid]?.oldestTimestampLoaded ?? 0,
+          oldestCursor: state.pagination[chatJid]?.oldestCursor,
+          anchorMessageId: state.pagination[chatJid]?.anchorMessageId,
           hasMoreLocal: state.pagination[chatJid]?.hasMoreLocal ?? false,
           canRequestOlder: state.pagination[chatJid]?.canRequestOlder ?? false,
           loadingMore: loading,
+          historyState: state.pagination[chatJid]?.historyState ?? 'unknown',
         },
       },
     })),
@@ -422,6 +457,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       pagination: {},
       syncProgressCount: 0,
       syncProgress: null,
+      syncStartedAt: Date.now(),
       presence: {},
     }),
 
@@ -437,10 +473,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       syncProgressCount: state.syncProgressCount + count,
     })),
 
-  setSyncProgress: (syncProgress) => set({
-    syncProgress,
-    isSyncing: syncProgress.phase === 'initial' || syncProgress.phase === 'background',
-    syncProgressCount: syncProgress.processedChats,
+  setSyncProgress: (syncProgress) => set((state) => {
+    const syncing = syncProgress.phase === 'initial' || syncProgress.phase === 'background';
+    return {
+      syncProgress,
+      isSyncing: syncing,
+      syncStartedAt: syncing
+        ? (state.isSyncing && state.syncStartedAt ? state.syncStartedAt : Date.now())
+        : null,
+      syncProgressCount: syncProgress.processedChats,
+    };
   }),
 
   setPresence: (event) => set((state) => ({
@@ -460,9 +502,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
     },
   })),
 
+  applyReadResult: (chatJid, result) => set((state) => {
+    const readIDs = new Set(result.messageIds || []);
+    return {
+      messages: {
+        ...state.messages,
+        [chatJid]: (state.messages[chatJid] || []).map((message) =>
+          readIDs.has(message.id) ? { ...message, isRead: true } : message),
+      },
+      chats: state.chats.map((chat) =>
+        chat.jid === chatJid ? { ...chat, unreadCount: result.unreadCount } : chat),
+    };
+  }),
+
   filteredChats: () => {
-    const { chats, searchQuery, activeChatListID } = get();
-    let visible = chats;
+    const { chats, searchQuery, activeChatListID, activeRailView } = get();
+		let visible = activeRailView === 'archived'
+      ? chats.filter((chat) => chat.isArchived)
+      : chats.filter((chat) => !chat.isArchived);
     if (activeChatListID === 'unread') visible = visible.filter((chat) => chat.unreadCount > 0);
     else if (activeChatListID === 'groups') visible = visible.filter((chat) => chat.isGroup);
     else if (activeChatListID !== 'all') visible = visible.filter((chat) => chat.listIds?.includes(activeChatListID));

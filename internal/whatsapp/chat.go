@@ -36,21 +36,23 @@ type ChatItem struct {
 
 // MessageItem represents a single message in a chat conversation
 type MessageItem struct {
-	ID            string `json:"id"`
-	ChatJID       string `json:"chatJid"`
-	SenderJID     string `json:"senderJid"`
-	SenderName    string `json:"senderName"`
-	Content       string `json:"content"`
-	Timestamp     int64  `json:"timestamp"` // Unix timestamp
-	IsFromMe      bool   `json:"isFromMe"`
-	IsRead        bool   `json:"isRead"`
-	MediaType     string `json:"mediaType,omitempty"`     // "image", "video", "audio", "document", "sticker", ""
-	MediaURL      string `json:"mediaUrl,omitempty"`      // Local cached file path
-	MediaDuration uint32 `json:"mediaDuration,omitempty"` // Duration in seconds (audio/video)
-	FileName      string `json:"fileName,omitempty"`      // Original filename (documents)
-	Mimetype      string `json:"mimetype,omitempty"`      // MIME type
-	Thumbnail     string `json:"thumbnail,omitempty"`     // Base64 JPEG preview for media
-	IsPTT         bool   `json:"isPtt,omitempty"`         // Push-to-talk (voice note)
+	ID            string   `json:"id"`
+	ChatJID       string   `json:"chatJid"`
+	SenderJID     string   `json:"senderJid"`
+	SenderName    string   `json:"senderName"`
+	Content       string   `json:"content"`
+	Timestamp     int64    `json:"timestamp"` // Unix timestamp
+	Order         uint64   `json:"order"`
+	IsFromMe      bool     `json:"isFromMe"`
+	IsRead        bool     `json:"isRead"`
+	MediaType     string   `json:"mediaType,omitempty"`     // "image", "video", "audio", "document", "sticker", ""
+	MediaURL      string   `json:"mediaUrl,omitempty"`      // Local cached file path
+	MediaDuration uint32   `json:"mediaDuration,omitempty"` // Duration in seconds (audio/video)
+	FileName      string   `json:"fileName,omitempty"`      // Original filename (documents)
+	Mimetype      string   `json:"mimetype,omitempty"`      // MIME type
+	Thumbnail     string   `json:"thumbnail,omitempty"`     // Base64 JPEG preview for media
+	Waveform      []uint32 `json:"waveform,omitempty"`      // Normalized voice-note amplitudes
+	IsPTT         bool     `json:"isPtt,omitempty"`         // Push-to-talk (voice note)
 	// DeliveryStatus applies only to outgoing messages: sent, delivered, read.
 	DeliveryStatus string `json:"deliveryStatus,omitempty"`
 	// ClientRequestID only exists while the desktop UI reconciles an
@@ -72,12 +74,46 @@ type MessageItem struct {
 // copied to Wamio's private staging area. The original filesystem path is
 // deliberately kept server-side.
 type AttachmentDraft struct {
-	ID       string `json:"id"`
-	Kind     string `json:"kind"` // image, video, audio, document
-	FileName string `json:"fileName"`
-	Mimetype string `json:"mimetype"`
-	FileSize uint64 `json:"fileSize"`
-	IsPTT    bool   `json:"isPtt,omitempty"`
+	ID            string   `json:"id"`
+	Kind          string   `json:"kind"` // image, video, audio, document
+	FileName      string   `json:"fileName"`
+	Mimetype      string   `json:"mimetype"`
+	FileSize      uint64   `json:"fileSize"`
+	IsPTT         bool     `json:"isPtt,omitempty"`
+	MediaDuration uint32   `json:"mediaDuration,omitempty"`
+	Waveform      []uint32 `json:"waveform,omitempty"`
+}
+
+func waveformFromBytes(values []byte) []uint32 {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make([]uint32, len(values))
+	for index, value := range values {
+		result[index] = uint32(value)
+	}
+	return result
+}
+
+func waveformToBytes(values []uint32) []byte {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make([]byte, len(values))
+	for index, value := range values {
+		if value > 255 {
+			value = 255
+		}
+		result[index] = byte(value)
+	}
+	return result
+}
+
+// ReadAckResult lets the renderer update message flags and the sidebar badge
+// from the same durable state used by the backend.
+type ReadAckResult struct {
+	MessageIDs  []string `json:"messageIds"`
+	UnreadCount int      `json:"unreadCount"`
 }
 
 // StickerItem is the UI-safe portion of a recently synchronized sticker.
@@ -207,8 +243,11 @@ type MessageDeleteEvent struct {
 
 // InitialSyncEvent is emitted to signal initial sync lifecycle state
 type InitialSyncEvent struct {
-	State   string `json:"state"` // "running" | "ready" | "degraded"
-	Message string `json:"message,omitempty"`
+	State     string `json:"state"` // "running" | "ready" | "degraded"
+	Message   string `json:"message,omitempty"`
+	UIReady   bool   `json:"uiReady"`
+	Accepting bool   `json:"accepting"`
+	Terminal  bool   `json:"terminal"`
 }
 
 // SyncProgressEvent reports actual pairing/history progress. Progress is -1
@@ -219,6 +258,8 @@ type SyncProgressEvent struct {
 	ProcessedChats int    `json:"processedChats"`
 	PreparedChats  int    `json:"preparedChats"`
 	Message        string `json:"message,omitempty"`
+	UIReady        bool   `json:"uiReady"`
+	Accepting      bool   `json:"accepting"`
 }
 
 // PresenceEvent describes the latest server-provided status for a personal chat.
@@ -235,20 +276,61 @@ type ChatPresenceEvent struct {
 	Typing  bool   `json:"typing"`
 }
 
-// MessagePage is a local page plus whether older history may be requested
-// from the primary phone once the local cache is exhausted.
+type MessageCursor struct {
+	Timestamp int64  `json:"timestamp"`
+	Order     uint64 `json:"order"`
+	MessageID string `json:"messageId"`
+	IsFromMe  bool   `json:"isFromMe"`
+}
+
+type MessageLoadRequest struct {
+	RequestID       string         `json:"requestId"`
+	ChatJID         string         `json:"chatJid"`
+	Mode            string         `json:"mode"` // initial | before | around
+	Limit           int            `json:"limit"`
+	Cursor          *MessageCursor `json:"cursor,omitempty"`
+	TargetMessageID string         `json:"targetMessageId,omitempty"`
+	ForceRetry      bool           `json:"forceRetry,omitempty"`
+}
+
+type MessageLoadProgress struct {
+	RequestID string `json:"requestId"`
+	Mode      string `json:"mode"`
+	Phase     string `json:"phase"` // local | remote | merge | complete | retryable-failure
+	Loaded    int    `json:"loaded"`
+	Total     int    `json:"total"`
+	Percent   int    `json:"percent"`
+	State     string `json:"state"`
+	RetryAt   int64  `json:"retryAt,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+// MessagePage is a stable local page plus the current remote-history state.
 type MessagePage struct {
-	Messages        []MessageItem `json:"messages"`
-	HasMoreLocal    bool          `json:"hasMoreLocal"`
-	CanRequestOlder bool          `json:"canRequestOlder"`
+	Messages        []MessageItem        `json:"messages"`
+	OldestCursor    *MessageCursor       `json:"oldestCursor,omitempty"`
+	NewestCursor    *MessageCursor       `json:"newestCursor,omitempty"`
+	AnchorMessageID string               `json:"anchorMessageId,omitempty"`
+	HasMoreLocal    bool                 `json:"hasMoreLocal"`
+	HistoryState    string               `json:"historyState"`
+	CanRequestOlder bool                 `json:"canRequestOlder"`
+	RequestID       string               `json:"requestId,omitempty"`
+	Progress        *MessageLoadProgress `json:"progress,omitempty"`
+	Error           string               `json:"error,omitempty"`
 }
 
 // HistoryPageEvent delivers asynchronous ON_DEMAND history to the frontend.
 type HistoryPageEvent struct {
-	ChatJID         string        `json:"chatJid"`
-	Messages        []MessageItem `json:"messages"`
-	CanRequestOlder bool          `json:"canRequestOlder"`
-	Error           string        `json:"error,omitempty"`
+	ChatJID         string               `json:"chatJid"`
+	RequestID       string               `json:"requestId,omitempty"`
+	Mode            string               `json:"mode,omitempty"`
+	Messages        []MessageItem        `json:"messages"`
+	OldestCursor    *MessageCursor       `json:"oldestCursor,omitempty"`
+	NewestCursor    *MessageCursor       `json:"newestCursor,omitempty"`
+	HistoryState    string               `json:"historyState"`
+	CanRequestOlder bool                 `json:"canRequestOlder"`
+	Progress        *MessageLoadProgress `json:"progress,omitempty"`
+	Error           string               `json:"error,omitempty"`
 }
 
 // NotificationEvent is emitted for native OS notifications

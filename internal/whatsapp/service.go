@@ -3,6 +3,8 @@ package whatsapp
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -46,7 +48,20 @@ const (
 	initialPreloadLimit    = 30
 	initialPreloadBatch    = 5
 	initialPreloadMessages = 20
+	olderPageMessages      = 50
 )
+
+type pendingHistoryRequest struct {
+	RequestID     string
+	ChatJID       string
+	Mode          string
+	Limit         int
+	Cursor        MessageCursor
+	SentMessageID string
+	Loaded        int
+	TargetTotal   int
+	TimedOut      bool
+}
 
 // WhatsAppService manages the whatsmeow client and exposes methods to the frontend via Wails bindings
 type WhatsAppService struct {
@@ -77,9 +92,11 @@ type WhatsAppService struct {
 	initialConversations     map[string]*waHistorySync.Conversation
 	initialMaterialized      map[string]bool
 	initialMaterializing     map[string]chan struct{}
+	initialChunkSeen         map[string]struct{}
 	initialPreloadGeneration uint64
 	initialProcessedChats    int
-	pendingOlder             map[string]bool
+	pendingOlder             map[string]*pendingHistoryRequest
+	historyRequestsByMessage map[string]*pendingHistoryRequest
 	filterMu                 sync.RWMutex
 	chatFilter               map[string]bool
 
@@ -110,19 +127,21 @@ func NewWhatsAppService() *WhatsAppService {
 	mediaBase := filepath.Join(configDir, "Wamio")
 
 	return &WhatsAppService{
-		state:                StateDisconnected,
-		log:                  waLog.Stdout("Wamio", "INFO", true),
-		chats:                make(map[string]*ChatItem),
-		messages:             make(map[string][]MessageItem),
-		pendingOlder:         make(map[string]bool),
-		chatFilter:           make(map[string]bool),
-		initialConversations: make(map[string]*waHistorySync.Conversation),
-		initialMaterialized:  make(map[string]bool),
-		initialMaterializing: make(map[string]chan struct{}),
-		mediaCache:           NewMediaCache(mediaBase),
-		drafts:               make(map[string]stagedAttachment),
-		draftDir:             filepath.Join(mediaBase, "staging"),
-		recentStickers:       make(map[string]*waHistorySync.StickerMetadata),
+		state:                    StateDisconnected,
+		log:                      waLog.Stdout("Wamio", "INFO", true),
+		chats:                    make(map[string]*ChatItem),
+		messages:                 make(map[string][]MessageItem),
+		pendingOlder:             make(map[string]*pendingHistoryRequest),
+		historyRequestsByMessage: make(map[string]*pendingHistoryRequest),
+		chatFilter:               make(map[string]bool),
+		initialConversations:     make(map[string]*waHistorySync.Conversation),
+		initialMaterialized:      make(map[string]bool),
+		initialMaterializing:     make(map[string]chan struct{}),
+		initialChunkSeen:         make(map[string]struct{}),
+		mediaCache:               NewMediaCache(mediaBase),
+		drafts:                   make(map[string]stagedAttachment),
+		draftDir:                 filepath.Join(mediaBase, "staging"),
+		recentStickers:           make(map[string]*waHistorySync.StickerMetadata),
 	}
 }
 
@@ -380,6 +399,7 @@ func (s *WhatsAppService) connect(accountID string, allowPair bool) error {
 	s.initialConversations = make(map[string]*waHistorySync.Conversation)
 	s.initialMaterialized = make(map[string]bool)
 	s.initialMaterializing = make(map[string]chan struct{})
+	s.initialChunkSeen = make(map[string]struct{})
 	s.initialPreloadGeneration++
 	s.initialMu.Unlock()
 
@@ -447,7 +467,8 @@ func (s *WhatsAppService) resetAccountDataLocked() {
 	s.chatMu.Lock()
 	s.chats = make(map[string]*ChatItem)
 	s.messages = make(map[string][]MessageItem)
-	s.pendingOlder = make(map[string]bool)
+	s.pendingOlder = make(map[string]*pendingHistoryRequest)
+	s.historyRequestsByMessage = make(map[string]*pendingHistoryRequest)
 	s.chatMu.Unlock()
 	s.draftMu.Lock()
 	s.drafts = make(map[string]stagedAttachment)
@@ -559,6 +580,7 @@ func (s *WhatsAppService) Logout() error {
 	s.initialConversations = make(map[string]*waHistorySync.Conversation)
 	s.initialMaterialized = make(map[string]bool)
 	s.initialMaterializing = make(map[string]chan struct{})
+	s.initialChunkSeen = make(map[string]struct{})
 	s.initialPreloadGeneration++
 	s.initialMu.Unlock()
 
@@ -591,7 +613,8 @@ func (s *WhatsAppService) Logout() error {
 	s.chatMu.Lock()
 	s.chats = make(map[string]*ChatItem)
 	s.messages = make(map[string][]MessageItem)
-	s.pendingOlder = make(map[string]bool)
+	s.pendingOlder = make(map[string]*pendingHistoryRequest)
+	s.historyRequestsByMessage = make(map[string]*pendingHistoryRequest)
 	s.chatMu.Unlock()
 
 	s.setState(StateLoggedOut)
@@ -1610,9 +1633,9 @@ func containsMessageID(ids []string, id string) bool {
 
 func messageRowFromItem(msg MessageItem) store.MessageRow {
 	row := store.MessageRow{ID: msg.ID, ChatJID: msg.ChatJID, SenderJID: msg.SenderJID, SenderName: msg.SenderName,
-		Content: msg.Content, Timestamp: msg.Timestamp, IsFromMe: msg.IsFromMe, IsRead: msg.IsRead,
+		Content: msg.Content, Timestamp: msg.Timestamp, MessageOrder: msg.Order, IsFromMe: msg.IsFromMe, IsRead: msg.IsRead,
 		MediaType: msg.MediaType, MediaDuration: msg.MediaDuration, FileName: msg.FileName,
-		Mimetype: msg.Mimetype, Thumbnail: msg.Thumbnail, IsPTT: msg.IsPTT, DeliveryStatus: msg.DeliveryStatus,
+		Mimetype: msg.Mimetype, Thumbnail: msg.Thumbnail, Waveform: waveformToBytes(msg.Waveform), IsPTT: msg.IsPTT, DeliveryStatus: msg.DeliveryStatus,
 		IsForwarded: msg.IsForwarded, IsDeleted: msg.IsDeleted, Caption: msg.Caption, FileSize: msg.FileSize, Kind: msg.Kind}
 	if msg.Call != nil {
 		row.CallID, row.CallOutcome, row.CallDuration, row.CallIsVideo, row.CallIsIncoming = msg.Call.CallID, msg.Call.Outcome, msg.Call.Duration, msg.Call.IsVideo, msg.Call.IsIncoming
@@ -1704,6 +1727,9 @@ func (s *WhatsAppService) addMessageToCache(chatJID string, msg MessageItem) {
 			if msg.IsRead {
 				s.messages[chatJID][i].IsRead = true
 			}
+			if msg.Order != 0 {
+				s.messages[chatJID][i].Order = msg.Order
+			}
 			s.chatMu.Unlock()
 			if s.chatStore != nil {
 				_ = s.chatStore.UpsertMessage(messageRowFromItem(msg))
@@ -1715,6 +1741,9 @@ func (s *WhatsAppService) addMessageToCache(chatJID string, msg MessageItem) {
 	sort.SliceStable(s.messages[chatJID], func(i, j int) bool {
 		if s.messages[chatJID][i].Timestamp != s.messages[chatJID][j].Timestamp {
 			return s.messages[chatJID][i].Timestamp < s.messages[chatJID][j].Timestamp
+		}
+		if s.messages[chatJID][i].Order != s.messages[chatJID][j].Order {
+			return s.messages[chatJID][i].Order < s.messages[chatJID][j].Order
 		}
 		return s.messages[chatJID][i].ID < s.messages[chatJID][j].ID
 	})
@@ -1796,6 +1825,18 @@ func (s *WhatsAppService) loadChatsFromDB() {
 	loaded := make(map[string]*ChatItem, len(chatRows))
 	for _, c := range chatRows {
 		s.backfillPreviewMetadata(&c)
+		// An in-flight request cannot survive a process restart or reconnect.
+		// Likewise, reconnecting is a meaningful recovery boundary for a
+		// transient phone/network failure, so make the request immediately
+		// available again instead of preserving a stale cooldown.
+		if c.HistoryState == store.HistoryInProgress || c.HistoryState == store.HistoryRetryableFailure {
+			_ = s.chatStore.ResetHistoryRetry(c.JID)
+			if c.LastMessageID != "" {
+				c.HistoryState = store.HistoryMoreOnPrimary
+			} else {
+				c.HistoryState = store.HistoryUnknown
+			}
+		}
 		originalJID, parseErr := types.ParseJID(c.JID)
 		if parseErr != nil {
 			continue
@@ -2240,6 +2281,7 @@ func (s *WhatsAppService) handleIncomingMessage(v *events.Message) {
 	// Extract media metadata
 	var mediaDuration uint32
 	var fileName, mimetype, caption string
+	var waveform []uint32
 	var fileSize uint64
 	var isPTT bool
 
@@ -2254,6 +2296,7 @@ func (s *WhatsAppService) handleIncomingMessage(v *events.Message) {
 	} else if v.Message.GetAudioMessage() != nil {
 		mimetype = v.Message.GetAudioMessage().GetMimetype()
 		mediaDuration = v.Message.GetAudioMessage().GetSeconds()
+		waveform = waveformFromBytes(v.Message.GetAudioMessage().GetWaveform())
 		isPTT = v.Message.GetAudioMessage().GetPTT()
 	} else if v.Message.GetVideoMessage() != nil {
 		mimetype = v.Message.GetVideoMessage().GetMimetype()
@@ -2288,6 +2331,7 @@ func (s *WhatsAppService) handleIncomingMessage(v *events.Message) {
 		FileName:       fileName,
 		Mimetype:       mimetype,
 		Thumbnail:      mediaThumbnail(v.Message),
+		Waveform:       waveform,
 		IsPTT:          isPTT,
 		DeliveryStatus: deliveryStatusForMessage(isFromMe),
 		ReplyTo:        s.replyReferenceFromMessage(info, v.Message),
@@ -2366,7 +2410,7 @@ func (s *WhatsAppService) handleHistorySync(v *events.HistorySync) {
 	}
 	if syncType == waHistorySync.HistorySync_ON_DEMAND {
 		for _, conv := range data.GetConversations() {
-			s.processHistoryConversation(syncType, conv)
+			s.processHistoryConversationForRequest(syncType, conv, s.matchHistoryRequest(v, conv))
 		}
 		return
 	}
@@ -2379,14 +2423,76 @@ func (s *WhatsAppService) handleHistorySync(v *events.HistorySync) {
 		// broad stale synchronization pass.
 		return
 	}
+	sessionID := ""
+	chunkOrder := data.GetChunkOrder()
+	if v.Notification != nil {
+		sessionID = v.Notification.GetPeerDataRequestSessionID()
+		if chunkOrder == 0 {
+			chunkOrder = v.Notification.GetChunkOrder()
+		}
+	}
+	chunkKey := initialHistoryChunkKey(s.initialPreloadGeneration, sessionID, syncType, chunkOrder, data)
+	s.initialMu.Lock()
+	if _, duplicate := s.initialChunkSeen[chunkKey]; duplicate {
+		s.initialMu.Unlock()
+		return
+	}
+	s.initialChunkSeen[chunkKey] = struct{}{}
+	s.initialMu.Unlock()
+	uiWasReady := s.initialSyncReady
 	for _, conv := range data.GetConversations() {
 		s.stageInitialConversation(conv)
+		if uiWasReady {
+			// The quiet window opens the shell but does not close history.
+			// Persist every late conversation's metadata/anchor immediately so
+			// it remains openable even if the app exits before the terminal chunk.
+			s.syncHistoryConversationMetadata(conv)
+		}
+	}
+	if uiWasReady && len(data.GetConversations()) > 0 {
+		s.emitEvent("wa:chats-sync", s.GetChats())
 	}
 	s.emitSyncProgress("initial", int32(data.GetProgress()), s.initialProcessedChats, 0, "Menerima chat terbaru")
 	s.scheduleInitialReady()
 	if data.GetProgress() >= 100 {
 		s.completeInitialSync("ready", "")
 	}
+}
+
+func initialHistoryChunkKey(generation uint64, sessionID string, syncType waHistorySync.HistorySync_HistorySyncType, chunkOrder uint32, data *waHistorySync.HistorySync) string {
+	payload, err := proto.MarshalOptions{Deterministic: true}.Marshal(data)
+	if err != nil {
+		return fmt.Sprintf("%d:%s:%d:%d:%d:%d", generation, sessionID, syncType, chunkOrder, data.GetProgress(), len(data.GetConversations()))
+	}
+	digest := sha256.Sum256(payload)
+	return fmt.Sprintf("%d:%s:%d:%d:%x", generation, sessionID, syncType, chunkOrder, digest[:12])
+}
+
+func (s *WhatsAppService) matchHistoryRequest(event *events.HistorySync, conv *waHistorySync.Conversation) *pendingHistoryRequest {
+	if conv == nil || conv.GetID() == "" {
+		return nil
+	}
+	source, err := types.ParseJID(conv.GetID())
+	if err != nil {
+		return nil
+	}
+	chatJID := s.canonicalChatJID(source).String()
+	originalID := ""
+	if event != nil && event.Notification != nil {
+		originalID = event.Notification.GetOriginalMessageID()
+	}
+	s.chatMu.RLock()
+	defer s.chatMu.RUnlock()
+	if originalID != "" {
+		request := s.historyRequestsByMessage[originalID]
+		if request != nil && request.ChatJID == chatJID {
+			return request
+		}
+		return nil
+	}
+	// Compatibility fallback for older primary devices that omit the original
+	// request ID. Only the single active request for this exact chat is eligible.
+	return s.pendingOlder[chatJID]
 }
 
 func (s *WhatsAppService) syncCallLogRecords(records []*waSyncAction.CallLogRecord) {
@@ -2471,19 +2577,17 @@ func (s *WhatsAppService) scheduleInitialReady() {
 	if s.initialReadyTimer != nil {
 		s.initialReadyTimer.Stop()
 	}
-	s.initialReadyTimer = time.AfterFunc(1200*time.Millisecond, func() { s.completeInitialSync("ready", "") })
+	s.initialReadyTimer = time.AfterFunc(1200*time.Millisecond, func() { s.makeInitialSyncUIReady("ready", "") })
 }
 
-func (s *WhatsAppService) completeInitialSync(state, message string) {
-	if !s.awaitingInitialSync {
+// makeInitialSyncUIReady opens the application shell without terminating the
+// history pipeline. WhatsApp can deliver additional chunks after a quiet gap.
+func (s *WhatsAppService) makeInitialSyncUIReady(state, message string) {
+	if s.initialSyncReady {
+		s.emitInitialSync(state, message)
 		return
 	}
-	s.awaitingInitialSync = false
 	s.initialSyncReady = true
-	if s.initialSyncTimer != nil {
-		s.initialSyncTimer.Stop()
-		s.initialSyncTimer = nil
-	}
 	if s.initialReadyTimer != nil {
 		s.initialReadyTimer.Stop()
 		s.initialReadyTimer = nil
@@ -2527,6 +2631,28 @@ func (s *WhatsAppService) completeInitialSync(state, message string) {
 
 	s.emitSyncProgress("background", preloadProgress(prepared, target), prepared, target, "Menyiapkan chat terbaru di latar belakang")
 	go s.preloadInitialConversations(generation, background, prepared, target, state, message)
+}
+
+// completeInitialSync is reserved for a server-declared terminal condition.
+// A UI timeout or quiet window must never call this function.
+func (s *WhatsAppService) completeInitialSync(state, message string) {
+	if !s.awaitingInitialSync {
+		return
+	}
+	s.awaitingInitialSync = false
+	if s.initialSyncTimer != nil {
+		s.initialSyncTimer.Stop()
+		s.initialSyncTimer = nil
+	}
+	if s.initialReadyTimer != nil {
+		s.initialReadyTimer.Stop()
+		s.initialReadyTimer = nil
+	}
+	if !s.initialSyncReady {
+		s.makeInitialSyncUIReady(state, message)
+		return
+	}
+	s.emitInitialSync(state, message)
 }
 
 // splitInitialPreload limits startup persistence to the 30 most recent chats.
@@ -2599,7 +2725,7 @@ func (s *WhatsAppService) initialPreloadCurrent(generation uint64) bool {
 func (s *WhatsAppService) isInitialSyncReady() bool { return s.initialSyncReady }
 
 func (s *WhatsAppService) emitSyncProgress(phase string, progress int32, processed, prepared int, message string) {
-	s.emitEvent("wa:sync-progress", SyncProgressEvent{Phase: phase, Progress: progress, ProcessedChats: processed, PreparedChats: prepared, Message: message})
+	s.emitEvent("wa:sync-progress", SyncProgressEvent{Phase: phase, Progress: progress, ProcessedChats: processed, PreparedChats: prepared, Message: message, UIReady: s.initialSyncReady, Accepting: s.awaitingInitialSync})
 }
 
 func (s *WhatsAppService) handlePresence(v *events.Presence) {
@@ -2724,6 +2850,10 @@ type orderedHistoryMessage struct {
 // processHistoryConversation accepts only the small, explicitly supported
 // history streams. It never relies on the slice order supplied by WhatsApp.
 func (s *WhatsAppService) processHistoryConversation(syncType waHistorySync.HistorySync_HistorySyncType, conv *waHistorySync.Conversation) {
+	s.processHistoryConversationForRequest(syncType, conv, nil)
+}
+
+func (s *WhatsAppService) processHistoryConversationForRequest(syncType waHistorySync.HistorySync_HistorySyncType, conv *waHistorySync.Conversation, request *pendingHistoryRequest) {
 	if conv == nil || conv.GetID() == "" {
 		return
 	}
@@ -2768,6 +2898,7 @@ func (s *WhatsAppService) processHistoryConversation(syncType waHistorySync.Hist
 		}
 		item.DeliveryStatus = deliveryStatusForHistoryMessage(item.IsFromMe, historyMsg.GetMessage().GetStatus())
 		item.ChatJID = chatJID
+		item.Order = historyMsg.GetMsgOrderID()
 		items = append(items, orderedHistoryMessage{item: item, order: historyMsg.GetMsgOrderID()})
 	}
 	sort.Slice(items, func(i, j int) bool {
@@ -2792,12 +2923,9 @@ func (s *WhatsAppService) processHistoryConversation(syncType waHistorySync.Hist
 	for i := range items {
 		items[i].item.Reactions = s.refreshCachedReactions(chatJID, items[i].item.ID)
 	}
-	if syncType != waHistorySync.HistorySync_ON_DEMAND && s.chatStore != nil {
-		// The initial cache is intentionally small. Older messages are persisted
-		// only after an explicit scroll-triggered request.
-		_ = s.chatStore.TrimMessages(chatJID, initialPreloadMessages)
-		s.reloadMessagesFromDB(chatJID, initialPreloadMessages)
-	}
+	// INITIAL/RECENT payloads are already bounded by the requested 20 messages.
+	// Do not trim the database here: doing so used to erase explicitly fetched
+	// on-demand pages and the user's durable open anchor on the next reconnect.
 
 	var newest *orderedHistoryMessage
 	if len(items) > 0 {
@@ -2808,22 +2936,63 @@ func (s *WhatsAppService) processHistoryConversation(syncType waHistorySync.Hist
 
 	if syncType == waHistorySync.HistorySync_ON_DEMAND {
 		canRequestOlder := !historyTransferExhausted(conv)
+		correlated := request != nil
+		if correlated {
+			for _, entry := range items {
+				if !messageBeforeCursor(entry.item, request.Cursor) {
+					correlated = false
+					break
+				}
+			}
+		}
 		if s.chatStore != nil {
-			state := 1
+			state := store.HistoryMoreOnPrimary
 			if !canRequestOlder {
-				state = 2
+				state = store.HistoryExhausted
 			}
 			_ = s.chatStore.SetHistoryState(chatJID, state)
 		}
-		s.chatMu.Lock()
-		delete(s.pendingOlder, chatJID)
-		s.chatMu.Unlock()
 		result := make([]MessageItem, 0, len(items))
 		for _, entry := range items {
 			result = append(result, entry.item)
 		}
-		s.emitEvent("wa:history-page", HistoryPageEvent{ChatJID: chatJID, Messages: result, CanRequestOlder: canRequestOlder})
+		requestID, mode, loaded, total := "", "before", len(result), len(result)
+		if correlated {
+			requestID, mode = request.RequestID, request.Mode
+			loaded = request.Loaded + len(result)
+			total = request.TargetTotal
+			if !canRequestOlder && loaded < total {
+				total = loaded
+			}
+			s.chatMu.Lock()
+			if s.pendingOlder[chatJID] == request {
+				delete(s.pendingOlder, chatJID)
+			}
+			delete(s.historyRequestsByMessage, request.SentMessageID)
+			s.chatMu.Unlock()
+		}
+		state := historyStateName(store.HistoryMoreOnPrimary)
+		if !canRequestOlder {
+			state = historyStateName(store.HistoryExhausted)
+		}
+		progress := newMessageLoadProgress(requestID, mode, "complete", loaded, total, state, 0, "")
+		oldest, newest := cursorsForMessages(result)
+		s.emitEvent("wa:history-page", HistoryPageEvent{ChatJID: chatJID, RequestID: requestID, Mode: mode, Messages: result,
+			OldestCursor: oldest, NewestCursor: newest, HistoryState: state, CanRequestOlder: canRequestOlder, Progress: progress})
 	}
+}
+
+func messageBeforeCursor(message MessageItem, cursor MessageCursor) bool {
+	if cursor.MessageID == "" {
+		return true
+	}
+	if message.Timestamp != cursor.Timestamp {
+		return message.Timestamp < cursor.Timestamp
+	}
+	if message.Order != cursor.Order {
+		return message.Order < cursor.Order
+	}
+	return message.ID < cursor.MessageID
 }
 
 // HistorySync carries an unread counter for the conversation, not an is-read
@@ -2876,7 +3045,7 @@ func (s *WhatsAppService) messageItemFromEvent(v *events.Message) (MessageItem, 
 	if image := v.Message.GetImageMessage(); image != nil {
 		item.Mimetype, item.Caption = image.GetMimetype(), image.GetCaption()
 	} else if audio := v.Message.GetAudioMessage(); audio != nil {
-		item.Mimetype, item.MediaDuration, item.IsPTT = audio.GetMimetype(), audio.GetSeconds(), audio.GetPTT()
+		item.Mimetype, item.MediaDuration, item.Waveform, item.IsPTT = audio.GetMimetype(), audio.GetSeconds(), waveformFromBytes(audio.GetWaveform()), audio.GetPTT()
 	} else if video := v.Message.GetVideoMessage(); video != nil {
 		item.Mimetype, item.MediaDuration, item.Caption = video.GetMimetype(), video.GetSeconds(), video.GetCaption()
 	} else if document := v.Message.GetDocumentMessage(); document != nil {
@@ -3076,9 +3245,9 @@ func (s *WhatsAppService) reloadMessagesFromDB(chatJID string, limit int) {
 
 func messageItemFromRow(m store.MessageRow) MessageItem {
 	item := MessageItem{ID: m.ID, ChatJID: m.ChatJID, SenderJID: m.SenderJID, SenderName: m.SenderName,
-		Content: m.Content, Timestamp: m.Timestamp, IsFromMe: m.IsFromMe, IsRead: m.IsRead,
+		Content: m.Content, Timestamp: m.Timestamp, Order: m.MessageOrder, IsFromMe: m.IsFromMe, IsRead: m.IsRead,
 		MediaType: m.MediaType, MediaDuration: m.MediaDuration, FileName: m.FileName,
-		Mimetype: m.Mimetype, Thumbnail: m.Thumbnail, IsPTT: m.IsPTT, DeliveryStatus: m.DeliveryStatus,
+		Mimetype: m.Mimetype, Thumbnail: m.Thumbnail, Waveform: waveformFromBytes(m.Waveform), IsPTT: m.IsPTT, DeliveryStatus: m.DeliveryStatus,
 		IsForwarded: m.IsForwarded, IsDeleted: m.IsDeleted, Caption: m.Caption, FileSize: m.FileSize, Kind: m.Kind}
 	if m.CallID != "" {
 		item.Call = &CallInfo{CallID: m.CallID, Outcome: m.CallOutcome, Duration: m.CallDuration, IsVideo: m.CallIsVideo, IsIncoming: m.CallIsIncoming}
@@ -3142,10 +3311,8 @@ func (s *WhatsAppService) GetRecentChatsWithMessages(days int, msgLimit int) []C
 	return result
 }
 
-// OpenChat subscribes to presence and acknowledges every locally unread
-// incoming message. The local badge is only changed after WhatsApp accepts
-// the receipt, so a transient connection error cannot pretend a message was
-// read on the phone.
+// OpenChat only subscribes presence. Read receipts are driven by the visible
+// viewport through MarkVisibleMessagesRead.
 func (s *WhatsAppService) OpenChat(chatJID string) error {
 	jid, err := types.ParseJID(chatJID)
 	if err != nil {
@@ -3161,23 +3328,130 @@ func (s *WhatsAppService) OpenChat(chatJID string) error {
 			s.emitEvent("wa:presence", PresenceEvent{ChatJID: jid.String(), Unavailable: true})
 		}
 	}
-	if s.chatStore == nil {
+	return nil
+}
+
+// SetChatArchived applies the same account-level app-state mutation used by
+// WhatsApp clients, then updates Wamio immediately instead of waiting for the
+// echoed app-state event.
+func (s *WhatsAppService) SetChatArchived(chatJID string, archived bool) (ChatItem, error) {
+	jid, err := types.ParseJID(chatJID)
+	if err != nil {
+		return ChatItem{}, fmt.Errorf("invalid chat JID: %w", err)
+	}
+	jid = s.canonicalChatJID(jid)
+	client := s.GetClient()
+	if client == nil || !client.IsConnected() {
+		return ChatItem{}, fmt.Errorf("not connected")
+	}
+	s.chatMu.RLock()
+	chat, ok := s.chats[jid.String()]
+	var lastMessageTime int64
+	if ok {
+		lastMessageTime = chat.LastMessageTime
+	}
+	s.chatMu.RUnlock()
+	if !ok {
+		return ChatItem{}, fmt.Errorf("chat not found")
+	}
+	var timestamp time.Time
+	if lastMessageTime > 0 {
+		timestamp = time.Unix(lastMessageTime, 0)
+	}
+	if err := client.SendAppState(context.Background(), appstate.BuildArchive(jid, archived, timestamp, nil)); err != nil {
+		return ChatItem{}, fmt.Errorf("failed to update archive state: %w", err)
+	}
+	s.chatMu.Lock()
+	chat, ok = s.chats[jid.String()]
+	if !ok {
+		s.chatMu.Unlock()
+		return ChatItem{}, fmt.Errorf("chat no longer available")
+	}
+	chat.IsArchived = archived
+	chat.ArchiveKnown = true
+	if archived {
+		chat.IsPinned = false
+		chat.PinKnown = true
+	}
+	updated := *chat
+	s.chatMu.Unlock()
+	s.persistAndEmitChat(jid.String())
+	return updated, nil
+}
+
+// MarkVoiceMessagePlayed sends a played receipt only for an incoming PTT.
+func (s *WhatsAppService) MarkVoiceMessagePlayed(chatJID, messageID string) error {
+	if s.chatStore == nil || messageID == "" {
 		return nil
 	}
-	rows, err := s.chatStore.GetUnreadIncomingMessages(jid.String())
-	if err != nil || len(rows) == 0 {
+	row, err := s.chatStore.GetMessage(chatJID, messageID)
+	if err != nil {
 		return err
+	}
+	if row.IsFromMe || !row.IsPTT {
+		return nil
+	}
+	chat, err := types.ParseJID(chatJID)
+	if err != nil {
+		return fmt.Errorf("invalid chat JID: %w", err)
+	}
+	sender, err := types.ParseJID(row.SenderJID)
+	if err != nil {
+		return fmt.Errorf("invalid message sender: %w", err)
+	}
+	client := s.GetClient()
+	if client == nil || !client.IsConnected() {
+		return fmt.Errorf("not connected")
+	}
+	return client.MarkRead(context.Background(), []types.MessageID{types.MessageID(messageID)}, time.Unix(row.Timestamp, 0), s.canonicalChatJID(chat), sender, types.ReceiptTypePlayed)
+}
+
+func (s *WhatsAppService) MarkVisibleMessagesRead(chatJID string, visibleMessageIDs []string, anchor MessageCursor) (ReadAckResult, error) {
+	jid, err := types.ParseJID(chatJID)
+	if err != nil {
+		return ReadAckResult{}, fmt.Errorf("invalid chat JID: %w", err)
+	}
+	jid = s.canonicalChatJID(jid)
+	if s.chatStore == nil {
+		return ReadAckResult{}, nil
+	}
+	if anchor.MessageID != "" {
+		_ = s.chatStore.SetLastOpened(jid.String(), messageCursorToStore(anchor))
+	}
+	if len(visibleMessageIDs) == 0 {
+		unread, _ := s.chatStore.GetUnreadIncomingCount(jid.String())
+		return ReadAckResult{MessageIDs: []string{}, UnreadCount: unread}, nil
+	}
+	wanted := make(map[string]struct{}, len(visibleMessageIDs))
+	for _, id := range visibleMessageIDs {
+		if id != "" {
+			wanted[id] = struct{}{}
+		}
+	}
+	rows, err := s.chatStore.GetUnreadIncomingMessages(jid.String())
+	if err != nil {
+		return ReadAckResult{}, err
 	}
 	bySender := make(map[string][]store.MessageRow)
 	for _, row := range rows {
-		bySender[row.SenderJID] = append(bySender[row.SenderJID], row)
+		if _, visible := wanted[row.ID]; visible {
+			bySender[row.SenderJID] = append(bySender[row.SenderJID], row)
+		}
 	}
-	acknowledged := make([]string, 0, len(rows))
+	if len(bySender) == 0 {
+		unread, _ := s.chatStore.GetUnreadIncomingCount(jid.String())
+		return ReadAckResult{MessageIDs: []string{}, UnreadCount: unread}, nil
+	}
+	client := s.GetClient()
+	if client == nil || !client.IsConnected() {
+		return ReadAckResult{}, fmt.Errorf("not connected")
+	}
+	acknowledged := make([]string, 0, len(visibleMessageIDs))
 	var readAt int64
 	for senderText, messages := range bySender {
 		sender, parseErr := types.ParseJID(senderText)
 		if parseErr != nil {
-			return fmt.Errorf("invalid message sender: %w", parseErr)
+			return ReadAckResult{}, fmt.Errorf("invalid message sender: %w", parseErr)
 		}
 		ids := make([]types.MessageID, 0, len(messages))
 		latest := int64(0)
@@ -3189,32 +3463,46 @@ func (s *WhatsAppService) OpenChat(chatJID string) error {
 			}
 		}
 		if err := client.MarkRead(context.Background(), ids, time.Unix(latest, 0), jid, sender); err != nil {
-			return fmt.Errorf("failed to mark message read: %w", err)
+			return ReadAckResult{}, fmt.Errorf("failed to mark message read: %w", err)
 		}
 		if latest > readAt {
 			readAt = latest
 		}
 	}
-	s.applyIncomingRead(jid.String(), acknowledged, readAt)
-	return nil
+	unread := s.applyIncomingRead(jid.String(), acknowledged, readAt)
+	return ReadAckResult{MessageIDs: acknowledged, UnreadCount: unread}, nil
 }
 
 // MarkChatRead remains as a backwards-compatible Wails binding. New clients
-// should use OpenChat so errors can be surfaced to the UI.
+// should report the visible IDs instead.
 func (s *WhatsAppService) MarkChatRead(chatJID string) {
-	if err := s.OpenChat(chatJID); err != nil {
+	if s.chatStore == nil {
+		return
+	}
+	rows, err := s.chatStore.GetUnreadIncomingMessages(chatJID)
+	if err != nil {
+		return
+	}
+	ids := make([]string, 0, len(rows))
+	var anchor MessageCursor
+	for _, row := range rows {
+		ids = append(ids, row.ID)
+		anchor = MessageCursor{Timestamp: row.Timestamp, Order: row.MessageOrder, MessageID: row.ID, IsFromMe: row.IsFromMe}
+	}
+	if _, err := s.MarkVisibleMessagesRead(chatJID, ids, anchor); err != nil {
 		s.log.Warnf("Failed to mark %s read: %v", chatJID, err)
 	}
 }
 
-func (s *WhatsAppService) applyIncomingRead(chatJID string, ids []string, readAt int64) {
+func (s *WhatsAppService) applyIncomingRead(chatJID string, ids []string, readAt int64) int {
 	if readAt <= 0 {
 		readAt = time.Now().Unix()
 	}
+	persisted := true
 	if s.chatStore != nil {
 		if err := s.chatStore.MarkIncomingMessagesRead(chatJID, ids, readAt); err != nil {
 			s.log.Warnf("Failed to persist read state for %s: %v", chatJID, err)
-			return
+			persisted = false
 		}
 	}
 	s.chatMu.Lock()
@@ -3223,9 +3511,24 @@ func (s *WhatsAppService) applyIncomingRead(chatJID string, ids []string, readAt
 			s.messages[chatJID][i].IsRead = true
 		}
 	}
+	unread := 0
+	durableCount := false
+	if s.chatStore != nil && persisted {
+		if durableUnread, err := s.chatStore.GetUnreadIncomingCount(chatJID); err == nil {
+			unread = durableUnread
+			durableCount = true
+		}
+	}
+	if !durableCount {
+		for i := range s.messages[chatJID] {
+			if !s.messages[chatJID][i].IsFromMe && !s.messages[chatJID][i].IsRead {
+				unread++
+			}
+		}
+	}
 	var updated *ChatItem
 	if chat, ok := s.chats[chatJID]; ok {
-		chat.UnreadCount = 0
+		chat.UnreadCount = unread
 		if readAt > chat.LastReadAt {
 			chat.LastReadAt = readAt
 		}
@@ -3236,6 +3539,7 @@ func (s *WhatsAppService) applyIncomingRead(chatJID string, ids []string, readAt
 	if updated != nil {
 		s.emitEvent("wa:chat-update", ChatUpdateEvent{Chat: *updated})
 	}
+	return unread
 }
 
 // CheckRegistered checks if a phone number is registered on WhatsApp
@@ -3354,46 +3658,202 @@ func (s *WhatsAppService) emitInitialSync(state string, message ...string) {
 	if len(message) > 0 {
 		text = message[0]
 	}
-	s.emitEvent("wa:initial-sync", InitialSyncEvent{State: state, Message: text})
+	s.emitEvent("wa:initial-sync", InitialSyncEvent{
+		State: state, Message: text, UIReady: s.initialSyncReady,
+		Accepting: s.awaitingInitialSync, Terminal: !s.awaitingInitialSync,
+	})
 }
 
-// GetMessagesPage returns a local page. Once it is exhausted the caller can
-// ask RequestOlderMessages, which contacts the primary device.
+func historyStateName(state int) string {
+	switch state {
+	case store.HistoryInProgress:
+		return "in_progress"
+	case store.HistoryMoreOnPrimary:
+		return "more_on_primary"
+	case store.HistoryExhausted:
+		return "exhausted"
+	case store.HistoryRetryableFailure:
+		return "retryable_failure"
+	default:
+		return "unknown"
+	}
+}
+
+func cursorForMessage(message MessageItem) *MessageCursor {
+	if message.ID == "" {
+		return nil
+	}
+	return &MessageCursor{Timestamp: message.Timestamp, Order: message.Order, MessageID: message.ID, IsFromMe: message.IsFromMe}
+}
+
+func cursorsForMessages(messages []MessageItem) (*MessageCursor, *MessageCursor) {
+	if len(messages) == 0 {
+		return nil, nil
+	}
+	return cursorForMessage(messages[0]), cursorForMessage(messages[len(messages)-1])
+}
+
+func newMessageLoadProgress(requestID, mode, phase string, loaded, total int, state string, retryAt int64, message string) *MessageLoadProgress {
+	if total < loaded {
+		total = loaded
+	}
+	percent := 100
+	if total > 0 {
+		percent = loaded * 100 / total
+	}
+	if percent > 100 {
+		percent = 100
+	}
+	return &MessageLoadProgress{RequestID: requestID, Mode: mode, Phase: phase, Loaded: loaded, Total: total, Percent: percent, State: state, RetryAt: retryAt, Error: message}
+}
+
+func messageCursorToStore(cursor MessageCursor) store.MessageCursor {
+	return store.MessageCursor{Timestamp: cursor.Timestamp, Order: cursor.Order, MessageID: cursor.MessageID, FromMe: cursor.IsFromMe}
+}
+
+func storeCursorToMessage(cursor store.MessageCursor) MessageCursor {
+	return MessageCursor{Timestamp: cursor.Timestamp, Order: cursor.Order, MessageID: cursor.MessageID, IsFromMe: cursor.FromMe}
+}
+
+func (s *WhatsAppService) nextMessageRequestID() string {
+	bytes := make([]byte, 8)
+	if _, err := rand.Read(bytes); err == nil {
+		return "history-" + hex.EncodeToString(bytes)
+	}
+	return fmt.Sprintf("history-%d", time.Now().UnixNano())
+}
+
+// GetMessagesPage is retained for older generated bindings. New callers use
+// LoadMessagesPage with a complete cursor and request ID.
 func (s *WhatsAppService) GetMessagesPage(chatJID string, limit int, beforeTimestamp int64) MessagePage {
-	return s.getMessagesPage(chatJID, limit, beforeTimestamp)
+	request := MessageLoadRequest{RequestID: s.nextMessageRequestID(), ChatJID: chatJID, Mode: "initial", Limit: limit}
+	if beforeTimestamp > 0 {
+		request.Mode = "before"
+		request.Cursor = &MessageCursor{Timestamp: beforeTimestamp}
+	}
+	return s.LoadMessagesPage(request)
 }
 
-func (s *WhatsAppService) getMessagesPage(chatJID string, limit int, beforeTimestamp int64) MessagePage {
-	if limit <= 0 {
-		limit = 100
+func (s *WhatsAppService) LoadMessagesPage(request MessageLoadRequest) MessagePage {
+	if request.RequestID == "" {
+		request.RequestID = s.nextMessageRequestID()
 	}
-	if limit > 100 {
-		limit = 100
+	if request.Mode == "" {
+		request.Mode = "initial"
 	}
-
-	if beforeTimestamp <= 0 {
-		messages := s.GetMessages(chatJID, limit)
-		if len(messages) == 0 && s.materializeInitialConversation(chatJID) {
-			messages = s.GetMessages(chatJID, limit)
+	if request.Limit <= 0 {
+		if request.Mode == "before" {
+			request.Limit = olderPageMessages
+		} else {
+			request.Limit = initialPreloadMessages
 		}
-		return MessagePage{Messages: messages, HasMoreLocal: len(messages) >= limit, CanRequestOlder: s.canRequestOlder(chatJID)}
+	}
+	if request.Limit > olderPageMessages {
+		request.Limit = olderPageMessages
+	}
+	batchTotal := request.Limit
+	page := MessagePage{Messages: []MessageItem{}, RequestID: request.RequestID}
+	if request.ChatJID == "" || s.chatStore == nil {
+		page.Error = "Chat tidak tersedia."
+		page.HistoryState = historyStateName(store.HistoryUnknown)
+		page.Progress = newMessageLoadProgress(request.RequestID, request.Mode, "retryable-failure", 0, request.Limit, page.HistoryState, 0, page.Error)
+		return page
 	}
 
+	var rows []store.MessageRow
+	var err error
+	anchorMessageID := ""
+	if request.Mode == "around" && request.TargetMessageID != "" {
+		rows, err = s.chatStore.GetMessagesAround(request.ChatJID, request.TargetMessageID, request.Limit)
+		anchorMessageID = request.TargetMessageID
+	} else if request.Mode == "before" && request.Cursor != nil {
+		rows, err = s.chatStore.GetMessagesBeforeCursor(request.ChatJID, messageCursorToStore(*request.Cursor), request.Limit+1)
+	} else {
+		// Reopening a conversation always prioritizes the first unread message.
+		// The previous viewport is deliberately ignored: when nothing is unread,
+		// the renderer must open at the newest message instead.
+		unread, unreadErr := s.chatStore.GetFirstUnreadMessage(request.ChatJID)
+		if unreadErr == sql.ErrNoRows && s.materializeInitialConversation(request.ChatJID) {
+			unread, unreadErr = s.chatStore.GetFirstUnreadMessage(request.ChatJID)
+		}
+		if unreadErr == nil {
+			rows, err = s.chatStore.GetMessagesAround(request.ChatJID, unread.ID, request.Limit)
+			anchorMessageID = unread.ID
+		}
+		if len(rows) == 0 && err == nil {
+			rows, err = s.chatStore.GetMessages(request.ChatJID, request.Limit+1)
+			if len(rows) == 0 && s.materializeInitialConversation(request.ChatJID) {
+				rows, err = s.chatStore.GetMessages(request.ChatJID, request.Limit+1)
+			}
+		}
+	}
+	if err != nil && err != sql.ErrNoRows {
+		page.Error = err.Error()
+	}
+
+	hasMoreLocal := false
+	if request.Mode != "around" && len(rows) > request.Limit {
+		hasMoreLocal = true
+		rows = rows[len(rows)-request.Limit:]
+	}
+	page.Messages = make([]MessageItem, 0, len(rows))
+	for _, row := range rows {
+		item := messageItemFromRow(row)
+		s.attachReactions(&item)
+		page.Messages = append(page.Messages, item)
+	}
+	page.AnchorMessageID = anchorMessageID
+	page.OldestCursor, page.NewestCursor = cursorsForMessages(page.Messages)
+	if page.OldestCursor != nil && !hasMoreLocal {
+		hasMoreLocal, _ = s.chatStore.HasMessagesBefore(request.ChatJID, messageCursorToStore(*page.OldestCursor))
+	}
+	page.HasMoreLocal = hasMoreLocal
+	status, _ := s.chatStore.GetHistoryStatus(request.ChatJID)
+	page.HistoryState = historyStateName(status.State)
+	page.CanRequestOlder = status.State != store.HistoryExhausted && status.State != store.HistoryInProgress
+
+	remaining := request.Limit - len(page.Messages)
+	if remaining > 0 && !page.HasMoreLocal && request.Mode != "around" && page.CanRequestOlder {
+		remoteCursor := s.remoteHistoryCursor(request.ChatJID, page.OldestCursor, request.Cursor)
+		if remoteCursor != nil {
+			request.Cursor = remoteCursor
+			request.Limit = remaining
+			if requestErr := s.requestOlderMessages(request, len(page.Messages), batchTotal); requestErr == nil {
+				page.HistoryState = historyStateName(store.HistoryInProgress)
+				page.CanRequestOlder = false
+				page.Progress = newMessageLoadProgress(request.RequestID, request.Mode, "remote", len(page.Messages), len(page.Messages)+remaining, page.HistoryState, 0, "")
+				return page
+			} else {
+				page.Error = requestErr.Error()
+				status, _ = s.chatStore.GetHistoryStatus(request.ChatJID)
+				page.HistoryState = historyStateName(status.State)
+				page.Progress = newMessageLoadProgress(request.RequestID, request.Mode, "retryable-failure", len(page.Messages), batchTotal, page.HistoryState, status.RetryAt, page.Error)
+				return page
+			}
+		}
+	}
+	page.Progress = newMessageLoadProgress(request.RequestID, request.Mode, "complete", len(page.Messages), len(page.Messages), page.HistoryState, status.RetryAt, page.Error)
+	return page
+}
+
+func (s *WhatsAppService) remoteHistoryCursor(chatJID string, pageOldest, requested *MessageCursor) *MessageCursor {
+	if pageOldest != nil && pageOldest.MessageID != "" {
+		copy := *pageOldest
+		return &copy
+	}
+	if requested != nil && requested.MessageID != "" {
+		copy := *requested
+		return &copy
+	}
 	if s.chatStore == nil {
-		return MessagePage{Messages: []MessageItem{}}
+		return nil
 	}
-
-	rows, err := s.chatStore.GetMessagesBefore(chatJID, beforeTimestamp, limit)
-	if err != nil {
-		return MessagePage{Messages: []MessageItem{}}
+	anchor, err := s.chatStore.GetLastMessageAnchor(chatJID)
+	if err != nil || anchor.MessageID == "" {
+		return nil
 	}
-
-	result := make([]MessageItem, len(rows))
-	for i, m := range rows {
-		result[i] = messageItemFromRow(m)
-		s.attachReactions(&result[i])
-	}
-	return MessagePage{Messages: result, HasMoreLocal: len(result) >= limit, CanRequestOlder: s.canRequestOlder(chatJID)}
+	converted := storeCursorToMessage(anchor)
+	return &converted
 }
 
 // materializeInitialConversation lazily imports the bounded recent payload for
@@ -3509,23 +3969,48 @@ func (s *WhatsAppService) canRequestOlder(chatJID string) bool {
 	if s.chatStore == nil {
 		return false
 	}
-	state, err := s.chatStore.GetHistoryState(chatJID)
-	return err == nil && state != 2 && state != 3
+	status, err := s.chatStore.GetHistoryStatus(chatJID)
+	if err != nil || status.State == store.HistoryExhausted || status.State == store.HistoryInProgress {
+		return false
+	}
+	return status.State != store.HistoryRetryableFailure || status.RetryAt <= time.Now().Unix()
 }
 
 // RequestOlderMessages asks the primary phone for up to 50 messages preceding
 // the supplied oldest local message. The result is delivered by wa:history-page.
 func (s *WhatsAppService) RequestOlderMessages(chatJID, oldestMessageID string, oldestMessageFromMe bool, oldestTimestamp int64, limit int) error {
-	if oldestMessageID == "" || oldestTimestamp <= 0 {
+	request := MessageLoadRequest{RequestID: s.nextMessageRequestID(), ChatJID: chatJID, Mode: "before", Limit: limit,
+		Cursor: &MessageCursor{MessageID: oldestMessageID, Timestamp: oldestTimestamp, IsFromMe: oldestMessageFromMe}}
+	return s.requestOlderMessages(request, 0, request.Limit)
+}
+
+func (s *WhatsAppService) RequestOlderMessagesPage(request MessageLoadRequest) error {
+	if request.RequestID == "" {
+		request.RequestID = s.nextMessageRequestID()
+	}
+	if request.Mode == "" {
+		request.Mode = "before"
+	}
+	return s.requestOlderMessages(request, 0, request.Limit)
+}
+
+func (s *WhatsAppService) requestOlderMessages(request MessageLoadRequest, loaded, targetTotal int) error {
+	if request.Cursor == nil || request.Cursor.MessageID == "" || request.Cursor.Timestamp <= 0 {
 		return fmt.Errorf("an oldest local message is required")
 	}
-	if limit <= 0 || limit > 50 {
-		limit = 50
+	if request.Limit <= 0 || request.Limit > olderPageMessages {
+		request.Limit = olderPageMessages
 	}
-	if !s.canRequestOlder(chatJID) {
+	if targetTotal <= 0 {
+		targetTotal = request.Limit
+	}
+	if request.ForceRetry && s.chatStore != nil {
+		_ = s.chatStore.ResetHistoryRetry(request.ChatJID)
+	}
+	if !s.canRequestOlder(request.ChatJID) {
 		return fmt.Errorf("older history is unavailable")
 	}
-	jid, err := types.ParseJID(chatJID)
+	jid, err := types.ParseJID(request.ChatJID)
 	if err != nil {
 		return fmt.Errorf("invalid chat JID: %w", err)
 	}
@@ -3536,32 +4021,59 @@ func (s *WhatsAppService) RequestOlderMessages(chatJID, oldestMessageID string, 
 		return fmt.Errorf("not connected")
 	}
 	s.chatMu.Lock()
-	if s.pendingOlder[chatJID] {
+	if s.pendingOlder[request.ChatJID] != nil {
 		s.chatMu.Unlock()
 		return nil
 	}
-	s.pendingOlder[chatJID] = true
+	pending := &pendingHistoryRequest{RequestID: request.RequestID, ChatJID: request.ChatJID, Mode: request.Mode,
+		Limit: request.Limit, Cursor: *request.Cursor, Loaded: loaded, TargetTotal: targetTotal}
+	s.pendingOlder[request.ChatJID] = pending
 	s.chatMu.Unlock()
+	if s.chatStore != nil {
+		_ = s.chatStore.SetHistoryState(request.ChatJID, store.HistoryInProgress)
+	}
 
-	info := &types.MessageInfo{MessageSource: types.MessageSource{Chat: jid, IsFromMe: oldestMessageFromMe}, ID: oldestMessageID, Timestamp: time.Unix(oldestTimestamp, 0)}
-	if _, err = client.SendPeerMessage(context.Background(), client.BuildHistorySyncRequest(info, limit)); err != nil {
+	info := &types.MessageInfo{MessageSource: types.MessageSource{Chat: jid, IsFromMe: request.Cursor.IsFromMe}, ID: request.Cursor.MessageID, Timestamp: time.Unix(request.Cursor.Timestamp, 0)}
+	response, err := client.SendPeerMessage(context.Background(), client.BuildHistorySyncRequest(info, request.Limit))
+	if err != nil {
 		s.chatMu.Lock()
-		delete(s.pendingOlder, chatJID)
+		if s.pendingOlder[request.ChatJID] == pending {
+			delete(s.pendingOlder, request.ChatJID)
+		}
 		s.chatMu.Unlock()
+		if s.chatStore != nil {
+			_, _ = s.chatStore.SetHistoryFailure(request.ChatJID, err.Error(), time.Now().Unix())
+		}
 		return fmt.Errorf("failed to request older history: %w", err)
 	}
+	pending.SentMessageID = response.ID
+	s.chatMu.Lock()
+	s.historyRequestsByMessage[response.ID] = pending
+	s.chatMu.Unlock()
 	time.AfterFunc(30*time.Second, func() {
 		s.chatMu.Lock()
-		if !s.pendingOlder[chatJID] {
+		if s.pendingOlder[request.ChatJID] != pending {
 			s.chatMu.Unlock()
 			return
 		}
-		delete(s.pendingOlder, chatJID)
+		delete(s.pendingOlder, request.ChatJID)
+		pending.TimedOut = true
 		s.chatMu.Unlock()
+		status := store.HistoryStatus{State: store.HistoryRetryableFailure}
 		if s.chatStore != nil {
-			_ = s.chatStore.SetHistoryState(chatJID, 3)
+			status, _ = s.chatStore.SetHistoryFailure(request.ChatJID, "Ponsel tidak merespons permintaan pesan lama.", time.Now().Unix())
 		}
-		s.emitEvent("wa:history-page", HistoryPageEvent{ChatJID: chatJID, CanRequestOlder: false, Error: "Ponsel tidak merespons permintaan pesan lama."})
+		message := "Ponsel tidak merespons permintaan pesan lama."
+		progress := newMessageLoadProgress(request.RequestID, request.Mode, "retryable-failure", pending.Loaded, pending.TargetTotal, historyStateName(status.State), status.RetryAt, message)
+		s.emitEvent("wa:history-page", HistoryPageEvent{ChatJID: request.ChatJID, RequestID: request.RequestID, Mode: request.Mode,
+			HistoryState: historyStateName(status.State), CanRequestOlder: true, Progress: progress, Error: message})
+		time.AfterFunc(10*time.Minute, func() {
+			s.chatMu.Lock()
+			if s.historyRequestsByMessage[pending.SentMessageID] == pending {
+				delete(s.historyRequestsByMessage, pending.SentMessageID)
+			}
+			s.chatMu.Unlock()
+		})
 	})
 	return nil
 }
@@ -3577,7 +4089,7 @@ func (s *WhatsAppService) startInitialSyncTimeout() {
 		// Notifications can arrive before history chunks. Keep the linked session
 		// usable and surface a recoverable status instead of falsely demanding a
 		// relink.
-		s.completeInitialSync("degraded", "Riwayat terbaru belum selesai. Pesan baru tetap akan masuk.")
+		s.makeInitialSyncUIReady("degraded", "Riwayat terbaru belum selesai. Sinkronisasi tetap berjalan di latar belakang.")
 	})
 }
 

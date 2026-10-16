@@ -56,6 +56,7 @@ export interface MessageItem {
   senderName: string;
   content: string;
   timestamp: number;
+  order?: number;
   isFromMe: boolean;
   isRead: boolean;
   mediaType?: string;
@@ -64,6 +65,7 @@ export interface MessageItem {
   fileName?: string;
   mimetype?: string;
   thumbnail?: string;
+  waveform?: number[];
   isPtt?: boolean;
   deliveryStatus?: string;
   clientRequestId?: string;
@@ -88,6 +90,13 @@ export interface AttachmentDraft {
   mimetype: string;
   fileSize: number;
   isPtt?: boolean;
+  mediaDuration?: number;
+  waveform?: number[];
+}
+
+export interface ReadAckResult {
+  messageIds: string[];
+  unreadCount: number;
 }
 
 export interface StickerItem {
@@ -175,6 +184,9 @@ export interface NotificationEvent {
 export interface InitialSyncEvent {
   state: 'running' | 'ready' | 'degraded';
   message?: string;
+  uiReady: boolean;
+  accepting: boolean;
+  terminal: boolean;
 }
 
 export interface SyncProgressEvent {
@@ -183,6 +195,8 @@ export interface SyncProgressEvent {
   processedChats: number;
   preparedChats: number;
   message?: string;
+  uiReady: boolean;
+  accepting: boolean;
 }
 
 export interface PresenceEvent {
@@ -197,16 +211,60 @@ export interface ChatPresenceEvent {
   typing: boolean;
 }
 
+export type HistoryState = 'unknown' | 'in_progress' | 'more_on_primary' | 'exhausted' | 'retryable_failure';
+
+export interface MessageCursor {
+  timestamp: number;
+  order: number;
+  messageId: string;
+  isFromMe: boolean;
+}
+
+export interface MessageLoadRequest {
+  requestId: string;
+  chatJid: string;
+  mode: 'initial' | 'before' | 'around';
+  limit: number;
+  cursor?: MessageCursor;
+  targetMessageId?: string;
+  forceRetry?: boolean;
+}
+
+export interface MessageLoadProgress {
+  requestId: string;
+  mode: MessageLoadRequest['mode'];
+  phase: 'local' | 'remote' | 'merge' | 'complete' | 'retryable-failure';
+  loaded: number;
+  total: number;
+  percent: number;
+  state: HistoryState;
+  retryAt?: number;
+  error?: string;
+}
+
 export interface MessagePage {
   messages: MessageItem[];
+  oldestCursor?: MessageCursor;
+  newestCursor?: MessageCursor;
+  anchorMessageId?: string;
   hasMoreLocal: boolean;
+  historyState: HistoryState;
   canRequestOlder: boolean;
+  requestId?: string;
+  progress?: MessageLoadProgress;
+  error?: string;
 }
 
 export interface HistoryPageEvent {
   chatJid: string;
+  requestId?: string;
+  mode?: MessageLoadRequest['mode'];
   messages: MessageItem[];
+  oldestCursor?: MessageCursor;
+  newestCursor?: MessageCursor;
+  historyState: HistoryState;
   canRequestOlder: boolean;
+  progress?: MessageLoadProgress;
   error?: string;
 }
 

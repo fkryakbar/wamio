@@ -6,10 +6,18 @@ export function PickAttachments(arg1) {
   return window['go']['main']['App']['PickAttachments'](arg1);
 }
 
+export function SetTaskbarBadge(arg1) {
+  return window['go']['main']['App']['SetTaskbarBadge'](arg1);
+}
+
 export function StageCapturedMedia(arg1, arg2, arg3, arg4) {
   return window['go']['main']['App']['StageCapturedMedia'](arg1, arg2, arg3, arg4);
 }
 
 export function StageDroppedAttachments(arg1) {
   return window['go']['main']['App']['StageDroppedAttachments'](arg1);
+}
+
+export function StageVoiceNote(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['StageVoiceNote'](arg1, arg2, arg3, arg4);
 }

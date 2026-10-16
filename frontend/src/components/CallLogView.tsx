@@ -36,6 +36,7 @@ export function CallLogView() {
   const [calls, setCalls] = useState<CallLogEntry[]>([]);
   const setActiveChat = useChatStore((state) => state.setActiveChat);
   const setActiveRailView = useChatStore((state) => state.setActiveRailView);
+  const chats = useChatStore((state) => state.chats);
 
   useEffect(() => {
     let disposed = false;
@@ -53,7 +54,7 @@ export function CallLogView() {
 
   const openChat = (chatJid: string) => {
     setActiveChat(chatJid);
-    setActiveRailView("chats");
+    setActiveRailView(chats.find((chat) => chat.jid === chatJid)?.isArchived ? "archived" : "chats");
   };
 
   return (

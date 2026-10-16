@@ -33,7 +33,14 @@ func (cs *ChatStore) createTables() error {
 			last_message_id TEXT NOT NULL DEFAULT '',
 			last_message_order INTEGER NOT NULL DEFAULT 0,
 			history_state INTEGER NOT NULL DEFAULT 0,
+			history_retry_at INTEGER NOT NULL DEFAULT 0,
+			history_failure_count INTEGER NOT NULL DEFAULT 0,
+			history_last_error TEXT NOT NULL DEFAULT '',
 			last_read_at INTEGER NOT NULL DEFAULT 0,
+			last_opened_message_id TEXT NOT NULL DEFAULT '',
+			last_opened_timestamp INTEGER NOT NULL DEFAULT 0,
+			last_opened_order INTEGER NOT NULL DEFAULT 0,
+			last_opened_from_me INTEGER NOT NULL DEFAULT 0,
 			last_message_from_me INTEGER NOT NULL DEFAULT 0,
 			last_message_status TEXT NOT NULL DEFAULT '',
 			is_archived INTEGER NOT NULL DEFAULT 0,
@@ -48,6 +55,7 @@ func (cs *ChatStore) createTables() error {
 			sender_name TEXT NOT NULL DEFAULT '',
 			content TEXT NOT NULL DEFAULT '',
 			timestamp INTEGER NOT NULL DEFAULT 0,
+			message_order INTEGER NOT NULL DEFAULT 0,
 			is_from_me INTEGER NOT NULL DEFAULT 0,
 			is_read INTEGER NOT NULL DEFAULT 0,
 			media_type TEXT NOT NULL DEFAULT '',
@@ -55,6 +63,7 @@ func (cs *ChatStore) createTables() error {
 			file_name TEXT NOT NULL DEFAULT '',
 			mimetype TEXT NOT NULL DEFAULT '',
 			thumbnail TEXT NOT NULL DEFAULT '',
+			waveform BLOB NOT NULL DEFAULT X'',
 			is_ptt INTEGER NOT NULL DEFAULT 0,
 			delivery_status TEXT NOT NULL DEFAULT '',
 			reply_id TEXT NOT NULL DEFAULT '',
@@ -128,7 +137,14 @@ func (cs *ChatStore) createTables() error {
 		"last_message_id TEXT NOT NULL DEFAULT ''",
 		"last_message_order INTEGER NOT NULL DEFAULT 0",
 		"history_state INTEGER NOT NULL DEFAULT 0",
+		"history_retry_at INTEGER NOT NULL DEFAULT 0",
+		"history_failure_count INTEGER NOT NULL DEFAULT 0",
+		"history_last_error TEXT NOT NULL DEFAULT ''",
 		"last_read_at INTEGER NOT NULL DEFAULT 0",
+		"last_opened_message_id TEXT NOT NULL DEFAULT ''",
+		"last_opened_timestamp INTEGER NOT NULL DEFAULT 0",
+		"last_opened_order INTEGER NOT NULL DEFAULT 0",
+		"last_opened_from_me INTEGER NOT NULL DEFAULT 0",
 		"last_message_from_me INTEGER NOT NULL DEFAULT 0",
 		"last_message_status TEXT NOT NULL DEFAULT ''",
 		"is_archived INTEGER NOT NULL DEFAULT 0",
@@ -140,8 +156,10 @@ func (cs *ChatStore) createTables() error {
 		}
 	}
 	for _, column := range []string{
+		"message_order INTEGER NOT NULL DEFAULT 0",
 		"delivery_status TEXT NOT NULL DEFAULT ''",
 		"thumbnail TEXT NOT NULL DEFAULT ''",
+		"waveform BLOB NOT NULL DEFAULT X''",
 		"reply_id TEXT NOT NULL DEFAULT ''",
 		"reply_chat_jid TEXT NOT NULL DEFAULT ''",
 		"reply_sender_jid TEXT NOT NULL DEFAULT ''",
@@ -165,7 +183,33 @@ func (cs *ChatStore) createTables() error {
 			return alterErr
 		}
 	}
+	if _, err = cs.db.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_chat_cursor ON wamio_messages(chat_jid, timestamp DESC, message_order DESC, id DESC)`); err != nil {
+		return err
+	}
 	return nil
+}
+
+const (
+	HistoryUnknown = iota
+	HistoryMoreOnPrimary
+	HistoryExhausted
+	HistoryRetryableFailure
+	HistoryInProgress
+)
+
+// MessageCursor is the canonical stable position used by every message query.
+type MessageCursor struct {
+	Timestamp int64
+	Order     uint64
+	MessageID string
+	FromMe    bool
+}
+
+type HistoryStatus struct {
+	State        int
+	RetryAt      int64
+	FailureCount int
+	LastError    string
 }
 
 // ChatRow represents a chat stored in the database
@@ -183,7 +227,7 @@ type ChatRow struct {
 	IsArchived        bool
 	IsPinned          bool
 	MutedUntil        int64
-	// HistoryState: 0 unknown, 1 primary has more, 2 exhausted, 3 unavailable.
+	// HistoryState: unknown, more-on-primary, exhausted, retryable failure, or in progress.
 	HistoryState int
 	// LastReadAt prevents a late history chunk from restoring an unread badge
 	// for messages that were already acknowledged on another device.
@@ -198,6 +242,7 @@ type MessageRow struct {
 	SenderName      string
 	Content         string
 	Timestamp       int64
+	MessageOrder    uint64
 	IsFromMe        bool
 	IsRead          bool
 	MediaType       string
@@ -205,6 +250,7 @@ type MessageRow struct {
 	FileName        string
 	Mimetype        string
 	Thumbnail       string
+	Waveform        []byte
 	IsPTT           bool
 	DeliveryStatus  string
 	ReplyID         string
@@ -313,16 +359,16 @@ func (cs *ChatStore) TrimRecentStickers(max int) error {
 	return err
 }
 
-const messageRowColumns = `id, chat_jid, sender_jid, sender_name, content, timestamp,
-	is_from_me, is_read, media_type, media_duration, file_name, mimetype, thumbnail, is_ptt, delivery_status,
+const messageRowColumns = `id, chat_jid, sender_jid, sender_name, content, timestamp, message_order,
+	is_from_me, is_read, media_type, media_duration, file_name, mimetype, thumbnail, waveform, is_ptt, delivery_status,
 	reply_id, reply_chat_jid, reply_sender_jid, reply_sender_name, reply_content, reply_media_type,
 	reply_from_me, reply_is_deleted, is_forwarded, is_deleted, caption, file_size, kind, call_id, call_outcome, call_duration, call_is_video, call_is_incoming`
 
 func scanMessageRow(scanner interface{ Scan(...interface{}) error }, m *MessageRow) error {
 	var isFromMe, isRead, isPTT, replyFromMe, replyIsDeleted, isForwarded, isDeleted, callIsVideo, callIsIncoming int
 	err := scanner.Scan(&m.ID, &m.ChatJID, &m.SenderJID, &m.SenderName, &m.Content,
-		&m.Timestamp, &isFromMe, &isRead, &m.MediaType, &m.MediaDuration,
-		&m.FileName, &m.Mimetype, &m.Thumbnail, &isPTT, &m.DeliveryStatus, &m.ReplyID,
+		&m.Timestamp, &m.MessageOrder, &isFromMe, &isRead, &m.MediaType, &m.MediaDuration,
+		&m.FileName, &m.Mimetype, &m.Thumbnail, &m.Waveform, &isPTT, &m.DeliveryStatus, &m.ReplyID,
 		&m.ReplyChatJID, &m.ReplySenderJID, &m.ReplySenderName, &m.ReplyContent,
 		&m.ReplyMediaType, &replyFromMe, &replyIsDeleted, &isForwarded, &isDeleted, &m.Caption, &m.FileSize,
 		&m.Kind, &m.CallID, &m.CallOutcome, &m.CallDuration, &callIsVideo, &callIsIncoming)
@@ -387,13 +433,15 @@ func (cs *ChatStore) UpsertMessage(m MessageRow) error {
 	// revoke arrives before the original message or races with history sync.
 	if m.IsDeleted {
 		m.Content, m.MediaType, m.FileName, m.Mimetype, m.Thumbnail, m.Caption = "", "", "", "", "", ""
+		m.Waveform = nil
 		m.MediaDuration, m.FileSize, m.IsPTT, m.Kind, m.CallID, m.CallOutcome, m.CallDuration, m.CallIsVideo, m.CallIsIncoming = 0, 0, false, "", "", "", 0, false, false
 	}
 	_, err := cs.db.Exec(`
 		INSERT INTO wamio_messages
-		(id, chat_jid, sender_jid, sender_name, content, timestamp, is_from_me, is_read, media_type, media_duration, file_name, mimetype, thumbnail, is_ptt, delivery_status, reply_id, reply_chat_jid, reply_sender_jid, reply_sender_name, reply_content, reply_media_type, reply_from_me, reply_is_deleted, is_forwarded, is_deleted, caption, file_size, kind, call_id, call_outcome, call_duration, call_is_video, call_is_incoming)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(id, chat_jid, sender_jid, sender_name, content, timestamp, message_order, is_from_me, is_read, media_type, media_duration, file_name, mimetype, thumbnail, waveform, is_ptt, delivery_status, reply_id, reply_chat_jid, reply_sender_jid, reply_sender_name, reply_content, reply_media_type, reply_from_me, reply_is_deleted, is_forwarded, is_deleted, caption, file_size, kind, call_id, call_outcome, call_duration, call_is_video, call_is_incoming)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id, chat_jid) DO UPDATE SET
+			message_order = CASE WHEN excluded.message_order != 0 THEN excluded.message_order ELSE wamio_messages.message_order END,
 			is_read = CASE WHEN excluded.is_read = 1 THEN 1 ELSE wamio_messages.is_read END,
 			delivery_status = CASE
 				WHEN excluded.delivery_status = 'read' THEN 'read'
@@ -401,6 +449,8 @@ func (cs *ChatStore) UpsertMessage(m MessageRow) error {
 				WHEN wamio_messages.delivery_status = '' THEN excluded.delivery_status
 				ELSE wamio_messages.delivery_status END,
 			thumbnail = CASE WHEN excluded.thumbnail != '' THEN excluded.thumbnail ELSE wamio_messages.thumbnail END,
+			waveform = CASE WHEN length(excluded.waveform) > 0 THEN excluded.waveform ELSE wamio_messages.waveform END,
+			media_duration = CASE WHEN excluded.media_duration != 0 THEN excluded.media_duration ELSE wamio_messages.media_duration END,
 			reply_id = CASE WHEN excluded.reply_id != '' THEN excluded.reply_id ELSE wamio_messages.reply_id END,
 			reply_chat_jid = CASE WHEN excluded.reply_id != '' THEN excluded.reply_chat_jid ELSE wamio_messages.reply_chat_jid END,
 			reply_sender_jid = CASE WHEN excluded.reply_id != '' THEN excluded.reply_sender_jid ELSE wamio_messages.reply_sender_jid END,
@@ -419,9 +469,9 @@ func (cs *ChatStore) UpsertMessage(m MessageRow) error {
 			call_duration = CASE WHEN wamio_messages.is_deleted = 1 THEN 0 WHEN excluded.call_duration != 0 THEN excluded.call_duration ELSE wamio_messages.call_duration END,
 			call_is_video = CASE WHEN wamio_messages.is_deleted = 1 THEN 0 WHEN excluded.call_is_video = 1 THEN 1 ELSE wamio_messages.call_is_video END,
 			call_is_incoming = CASE WHEN wamio_messages.is_deleted = 1 THEN 0 WHEN excluded.call_is_incoming = 1 THEN 1 ELSE wamio_messages.call_is_incoming END
-	`, m.ID, m.ChatJID, m.SenderJID, m.SenderName, m.Content, m.Timestamp,
+	`, m.ID, m.ChatJID, m.SenderJID, m.SenderName, m.Content, m.Timestamp, m.MessageOrder,
 		boolToInt(m.IsFromMe), boolToInt(m.IsRead), m.MediaType, m.MediaDuration,
-		m.FileName, m.Mimetype, m.Thumbnail, boolToInt(m.IsPTT), m.DeliveryStatus,
+		m.FileName, m.Mimetype, m.Thumbnail, m.Waveform, boolToInt(m.IsPTT), m.DeliveryStatus,
 		m.ReplyID, m.ReplyChatJID, m.ReplySenderJID, m.ReplySenderName, m.ReplyContent,
 		m.ReplyMediaType, boolToInt(m.ReplyFromMe), boolToInt(m.ReplyIsDeleted),
 		boolToInt(m.IsForwarded), boolToInt(m.IsDeleted), m.Caption, m.FileSize, m.Kind, m.CallID, m.CallOutcome,
@@ -486,7 +536,7 @@ func (cs *ChatStore) GetMessages(chatJID string, limit int) ([]MessageRow, error
 		SELECT `+messageRowColumns+`
 		FROM wamio_messages
 		WHERE chat_jid = ?
-		ORDER BY timestamp DESC
+		ORDER BY timestamp DESC, message_order DESC, id DESC
 		LIMIT ?
 	`, chatJID, limit)
 	if err != nil {
@@ -513,9 +563,15 @@ func (cs *ChatStore) GetMessages(chatJID string, limit int) ([]MessageRow, error
 	return msgs, nil
 }
 
-// GetMessagesBefore returns messages older than beforeTimestamp for a chat.
-// Results are returned in chronological order (oldest first).
+// GetMessagesBefore keeps the legacy timestamp-only store API for callers that
+// do not yet have an ID/order cursor.
 func (cs *ChatStore) GetMessagesBefore(chatJID string, beforeTimestamp int64, limit int) ([]MessageRow, error) {
+	return cs.GetMessagesBeforeCursor(chatJID, MessageCursor{Timestamp: beforeTimestamp}, limit)
+}
+
+// GetMessagesBeforeCursor returns messages older than the canonical cursor for a chat.
+// Results are returned in chronological order (oldest first).
+func (cs *ChatStore) GetMessagesBeforeCursor(chatJID string, before MessageCursor, limit int) ([]MessageRow, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -523,10 +579,14 @@ func (cs *ChatStore) GetMessagesBefore(chatJID string, beforeTimestamp int64, li
 	rows, err := cs.db.Query(`
 		SELECT `+messageRowColumns+`
 		FROM wamio_messages
-		WHERE chat_jid = ? AND timestamp < ?
-		ORDER BY timestamp DESC
+		WHERE chat_jid = ? AND (
+			timestamp < ? OR
+			(timestamp = ? AND message_order < ?) OR
+			(timestamp = ? AND message_order = ? AND id < ?)
+		)
+		ORDER BY timestamp DESC, message_order DESC, id DESC
 		LIMIT ?
-	`, chatJID, beforeTimestamp, limit)
+	`, chatJID, before.Timestamp, before.Timestamp, before.Order, before.Timestamp, before.Order, before.MessageID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -595,7 +655,7 @@ func (cs *ChatStore) GetUnreadIncomingMessages(chatJID string) ([]MessageRow, er
 		SELECT `+messageRowColumns+`
 		FROM wamio_messages
 		WHERE chat_jid = ? AND is_from_me = 0 AND is_read = 0
-		ORDER BY sender_jid, timestamp ASC, id ASC
+		ORDER BY sender_jid, timestamp ASC, message_order ASC, id ASC
 	`, chatJID)
 	if err != nil {
 		return nil, err
@@ -613,9 +673,16 @@ func (cs *ChatStore) GetUnreadIncomingMessages(chatJID string) ([]MessageRow, er
 	return messages, rows.Err()
 }
 
-// MarkIncomingMessagesRead persists a read acknowledgement and clears the
-// chat badge. A WhatsApp read receipt represents the visible read boundary,
-// not merely the IDs included in the receipt stanza.
+// GetUnreadIncomingCount returns the durable unread count for a chat. This is
+// intentionally independent from the bounded in-memory message cache.
+func (cs *ChatStore) GetUnreadIncomingCount(chatJID string) (int, error) {
+	var count int
+	err := cs.db.QueryRow(`SELECT COUNT(*) FROM wamio_messages WHERE chat_jid = ? AND is_from_me = 0 AND is_read = 0`, chatJID).Scan(&count)
+	return count, err
+}
+
+// MarkIncomingMessagesRead persists only the incoming messages that were
+// actually visible. The unread badge is recomputed instead of being cleared.
 func (cs *ChatStore) MarkIncomingMessagesRead(chatJID string, ids []string, readAt int64) error {
 	tx, err := cs.db.Begin()
 	if err != nil {
@@ -633,7 +700,10 @@ func (cs *ChatStore) MarkIncomingMessagesRead(chatJID string, ids []string, read
 			return err
 		}
 	}
-	_, err = tx.Exec(`UPDATE wamio_chats SET unread_count = 0, last_read_at = MAX(last_read_at, ?) WHERE jid = ?`, readAt, chatJID)
+	_, err = tx.Exec(`UPDATE wamio_chats SET
+		unread_count = (SELECT COUNT(*) FROM wamio_messages WHERE chat_jid = ? AND is_from_me = 0 AND is_read = 0),
+		last_read_at = MAX(last_read_at, ?)
+		WHERE jid = ?`, chatJID, readAt, chatJID)
 	if err != nil {
 		return err
 	}
@@ -701,49 +771,45 @@ func (cs *ChatStore) GetMessagesAround(chatJID, messageID string, limit int) ([]
 	if err != nil {
 		return nil, err
 	}
-	beforeLimit := limit / 2
-	afterLimit := limit - beforeLimit - 1
-	beforeRows, err := cs.db.Query(`
-		SELECT `+messageRowColumns+` FROM wamio_messages
-		WHERE chat_jid = ? AND (timestamp < ? OR (timestamp = ? AND id <= ?))
-		ORDER BY timestamp DESC, id DESC LIMIT ?`, chatJID, target.Timestamp, target.Timestamp, target.ID, beforeLimit+1)
+	var total, rank int
+	err = cs.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(CASE WHEN
+		timestamp < ? OR
+		(timestamp = ? AND message_order < ?) OR
+		(timestamp = ? AND message_order = ? AND id < ?)
+		THEN 1 ELSE 0 END), 0)
+		FROM wamio_messages WHERE chat_jid = ?`,
+		target.Timestamp, target.Timestamp, target.MessageOrder, target.Timestamp, target.MessageOrder, target.ID, chatJID).
+		Scan(&total, &rank)
 	if err != nil {
 		return nil, err
 	}
-	defer beforeRows.Close()
-	before := make([]MessageRow, 0, beforeLimit+1)
-	for beforeRows.Next() {
-		var row MessageRow
-		if err := scanMessageRow(beforeRows, &row); err != nil {
-			return nil, err
-		}
-		before = append(before, row)
+	offset := rank - limit/2
+	if offset < 0 {
+		offset = 0
 	}
-	if err := beforeRows.Err(); err != nil {
-		return nil, err
+	if maxOffset := total - limit; maxOffset >= 0 && offset > maxOffset {
+		offset = maxOffset
 	}
-	for left, right := 0, len(before)-1; left < right; left, right = left+1, right-1 {
-		before[left], before[right] = before[right], before[left]
-	}
-	afterRows, err := cs.db.Query(`
-		SELECT `+messageRowColumns+` FROM wamio_messages
-		WHERE chat_jid = ? AND (timestamp > ? OR (timestamp = ? AND id > ?))
-		ORDER BY timestamp ASC, id ASC LIMIT ?`, chatJID, target.Timestamp, target.Timestamp, target.ID, afterLimit)
+	rows, err := cs.db.Query(`SELECT `+messageRowColumns+` FROM wamio_messages
+		WHERE chat_jid = ?
+		ORDER BY timestamp ASC, message_order ASC, id ASC
+		LIMIT ? OFFSET ?`, chatJID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
-	defer afterRows.Close()
-	for afterRows.Next() {
+	defer rows.Close()
+	result := make([]MessageRow, 0, limit)
+	for rows.Next() {
 		var row MessageRow
-		if err := scanMessageRow(afterRows, &row); err != nil {
+		if err := scanMessageRow(rows, &row); err != nil {
 			return nil, err
 		}
-		before = append(before, row)
+		result = append(result, row)
 	}
-	if err := afterRows.Err(); err != nil {
+	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return before, nil
+	return result, nil
 }
 
 // UpsertReaction stores the last reaction made by one participant. An empty
@@ -847,8 +913,8 @@ func (cs *ChatStore) MergeChatCache(fromJID, toJID string) error {
 	}
 	defer tx.Rollback()
 	if _, err = tx.Exec(`INSERT OR IGNORE INTO wamio_messages
-		(id, chat_jid, sender_jid, sender_name, content, timestamp, is_from_me, is_read, media_type, media_duration, file_name, mimetype, thumbnail, is_ptt, delivery_status, reply_id, reply_chat_jid, reply_sender_jid, reply_sender_name, reply_content, reply_media_type, reply_from_me, reply_is_deleted, is_forwarded, is_deleted, caption, file_size, kind, call_id, call_outcome, call_duration, call_is_video, call_is_incoming)
-		SELECT id, ?, sender_jid, sender_name, content, timestamp, is_from_me, is_read, media_type, media_duration, file_name, mimetype, thumbnail, is_ptt, delivery_status, reply_id, reply_chat_jid, reply_sender_jid, reply_sender_name, reply_content, reply_media_type, reply_from_me, reply_is_deleted, is_forwarded, is_deleted, caption, file_size, kind, call_id, call_outcome, call_duration, call_is_video, call_is_incoming
+		(id, chat_jid, sender_jid, sender_name, content, timestamp, message_order, is_from_me, is_read, media_type, media_duration, file_name, mimetype, thumbnail, waveform, is_ptt, delivery_status, reply_id, reply_chat_jid, reply_sender_jid, reply_sender_name, reply_content, reply_media_type, reply_from_me, reply_is_deleted, is_forwarded, is_deleted, caption, file_size, kind, call_id, call_outcome, call_duration, call_is_video, call_is_incoming)
+		SELECT id, ?, sender_jid, sender_name, content, timestamp, message_order, is_from_me, is_read, media_type, media_duration, file_name, mimetype, thumbnail, waveform, is_ptt, delivery_status, reply_id, reply_chat_jid, reply_sender_jid, reply_sender_name, reply_content, reply_media_type, reply_from_me, reply_is_deleted, is_forwarded, is_deleted, caption, file_size, kind, call_id, call_outcome, call_duration, call_is_video, call_is_incoming
 		FROM wamio_messages WHERE chat_jid = ?`, toJID, fromJID); err != nil {
 		return err
 	}
@@ -870,7 +936,7 @@ func (cs *ChatStore) MergeChatCache(fromJID, toJID string) error {
 
 // SetHistoryState records whether an older-message request can be made.
 func (cs *ChatStore) SetHistoryState(jid string, state int) error {
-	_, err := cs.db.Exec(`UPDATE wamio_chats SET history_state = ? WHERE jid = ?`, state, jid)
+	_, err := cs.db.Exec(`UPDATE wamio_chats SET history_state = ?, history_retry_at = CASE WHEN ? != ? THEN 0 ELSE history_retry_at END, history_last_error = CASE WHEN ? != ? THEN '' ELSE history_last_error END WHERE jid = ?`, state, state, HistoryRetryableFailure, state, HistoryRetryableFailure, jid)
 	return err
 }
 
@@ -883,6 +949,100 @@ func (cs *ChatStore) GetHistoryState(jid string) (int, error) {
 	return state, err
 }
 
+func (cs *ChatStore) GetHistoryStatus(jid string) (HistoryStatus, error) {
+	var status HistoryStatus
+	err := cs.db.QueryRow(`SELECT history_state, history_retry_at, history_failure_count, history_last_error FROM wamio_chats WHERE jid = ?`, jid).
+		Scan(&status.State, &status.RetryAt, &status.FailureCount, &status.LastError)
+	if err == sql.ErrNoRows {
+		return HistoryStatus{State: HistoryUnknown}, nil
+	}
+	return status, err
+}
+
+func (cs *ChatStore) SetHistoryFailure(jid, message string, now int64) (HistoryStatus, error) {
+	_, err := cs.db.Exec(`UPDATE wamio_chats SET
+		history_state = ?,
+		history_failure_count = history_failure_count + 1,
+		history_last_error = ?
+		WHERE jid = ?`, HistoryRetryableFailure, message, jid)
+	if err != nil {
+		return HistoryStatus{}, err
+	}
+	status, err := cs.GetHistoryStatus(jid)
+	if err != nil {
+		return HistoryStatus{}, err
+	}
+	delay := int64(5)
+	for i := 1; i < status.FailureCount && delay < 60; i++ {
+		delay *= 2
+		if delay > 60 {
+			delay = 60
+		}
+	}
+	status.RetryAt = now + delay
+	_, err = cs.db.Exec(`UPDATE wamio_chats SET history_retry_at = ? WHERE jid = ?`, status.RetryAt, jid)
+	return status, err
+}
+
+func (cs *ChatStore) ResetHistoryRetry(jid string) error {
+	_, err := cs.db.Exec(`UPDATE wamio_chats SET
+		history_state = CASE WHEN last_message_id != '' THEN ? ELSE ? END,
+		history_retry_at = 0, history_failure_count = 0, history_last_error = ''
+		WHERE jid = ?`, HistoryMoreOnPrimary, HistoryUnknown, jid)
+	return err
+}
+
+func (cs *ChatStore) SetLastOpened(jid string, cursor MessageCursor) error {
+	_, err := cs.db.Exec(`UPDATE wamio_chats SET last_opened_message_id = ?, last_opened_timestamp = ?, last_opened_order = ?, last_opened_from_me = ? WHERE jid = ?`,
+		cursor.MessageID, cursor.Timestamp, cursor.Order, boolToInt(cursor.FromMe), jid)
+	return err
+}
+
+func (cs *ChatStore) GetLastOpened(jid string) (MessageCursor, error) {
+	var cursor MessageCursor
+	var fromMe int
+	err := cs.db.QueryRow(`SELECT last_opened_message_id, last_opened_timestamp, last_opened_order, last_opened_from_me FROM wamio_chats WHERE jid = ?`, jid).
+		Scan(&cursor.MessageID, &cursor.Timestamp, &cursor.Order, &fromMe)
+	if err == sql.ErrNoRows {
+		return MessageCursor{}, nil
+	}
+	cursor.FromMe = fromMe != 0
+	return cursor, err
+}
+
+func (cs *ChatStore) GetLastMessageAnchor(jid string) (MessageCursor, error) {
+	var cursor MessageCursor
+	var fromMe int
+	err := cs.db.QueryRow(`SELECT last_message_id, last_message_time, last_message_order, last_message_from_me FROM wamio_chats WHERE jid = ?`, jid).
+		Scan(&cursor.MessageID, &cursor.Timestamp, &cursor.Order, &fromMe)
+	if err == sql.ErrNoRows {
+		return MessageCursor{}, nil
+	}
+	cursor.FromMe = fromMe != 0
+	return cursor, err
+}
+
+func (cs *ChatStore) GetFirstUnreadMessage(chatJID string) (MessageRow, error) {
+	var message MessageRow
+	err := scanMessageRow(cs.db.QueryRow(`SELECT `+messageRowColumns+` FROM wamio_messages
+		WHERE chat_jid = ? AND is_from_me = 0 AND is_read = 0
+		ORDER BY timestamp ASC, message_order ASC, id ASC LIMIT 1`, chatJID), &message)
+	return message, err
+}
+
+func (cs *ChatStore) HasMessagesBefore(chatJID string, cursor MessageCursor) (bool, error) {
+	var found int
+	err := cs.db.QueryRow(`SELECT 1 FROM wamio_messages WHERE chat_jid = ? AND (
+		timestamp < ? OR
+		(timestamp = ? AND message_order < ?) OR
+		(timestamp = ? AND message_order = ? AND id < ?)
+	) LIMIT 1`, chatJID, cursor.Timestamp, cursor.Timestamp, cursor.Order, cursor.Timestamp, cursor.Order, cursor.MessageID).Scan(&found)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 // TrimMessages keeps the newest max messages for an initial RECENT sync.
 func (cs *ChatStore) TrimMessages(chatJID string, max int) error {
 	if max <= 0 {
@@ -891,7 +1051,7 @@ func (cs *ChatStore) TrimMessages(chatJID string, max int) error {
 	_, err := cs.db.Exec(`
 		DELETE FROM wamio_messages
 		WHERE chat_jid = ? AND id NOT IN (
-			SELECT id FROM wamio_messages WHERE chat_jid = ? ORDER BY timestamp DESC, id DESC LIMIT ?
+			SELECT id FROM wamio_messages WHERE chat_jid = ? ORDER BY timestamp DESC, message_order DESC, id DESC LIMIT ?
 		)
 	`, chatJID, chatJID, max)
 	return err

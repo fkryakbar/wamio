@@ -42,6 +42,19 @@ func (a *App) StageCapturedMedia(dataURL, fileName, kind string, isPTT bool) (wa
 	return a.wa.StageDataURL(dataURL, fileName, kind, isPTT)
 }
 
+func (a *App) StageVoiceNote(dataURL, fileName string, duration uint32, waveform []uint32) (wa.AttachmentDraft, error) {
+	return a.wa.StageVoiceNote(dataURL, fileName, duration, waveform)
+}
+
+// SetTaskbarBadge displays the total unread-message count on the native
+// Windows taskbar icon. Other platforms safely treat it as a no-op.
+func (a *App) SetTaskbarBadge(count int) error {
+	if count < 0 {
+		count = 0
+	}
+	return setTaskbarBadge(count)
+}
+
 // NewApp creates a new App application struct
 func NewApp(waService *wa.WhatsAppService) *App {
 	return &App{

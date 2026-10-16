@@ -85,6 +85,23 @@ func (s *WhatsAppService) StageDataURL(dataURL, fileName, requestedKind string, 
 	return draft, err
 }
 
+// StageVoiceNote preserves recording metadata that is required by WhatsApp's
+// PTT message and by the optimistic renderer.
+func (s *WhatsAppService) StageVoiceNote(dataURL, fileName string, duration uint32, waveform []uint32) (AttachmentDraft, error) {
+	draft, err := s.StageDataURL(dataURL, fileName, "audio", true)
+	if err != nil {
+		return AttachmentDraft{}, err
+	}
+	draft.MediaDuration = duration
+	draft.Waveform = append([]uint32(nil), waveform...)
+	s.draftMu.Lock()
+	staged := s.drafts[draft.ID]
+	staged.AttachmentDraft = draft
+	s.drafts[draft.ID] = staged
+	s.draftMu.Unlock()
+	return draft, nil
+}
+
 func (s *WhatsAppService) stageFile(source, requestedKind string, isPTT bool) (AttachmentDraft, error) {
 	info, err := os.Stat(source)
 	if err != nil {
@@ -255,7 +272,7 @@ func (s *WhatsAppService) SendAttachment(chatJID, draftID, caption, clientReques
 	}
 	_, _ = s.mediaCache.StoreOutgoingMedia(chatJID, resp.ID, draft.Mimetype, draft.Kind, draft.FileName, draft.path)
 	s.mediaCache.StoreRawMessage(chatJID, resp.ID, message)
-	sent := MessageItem{ID: resp.ID, ChatJID: chatJID, SenderJID: client.Store.ID.String(), Content: caption, Caption: caption, Timestamp: resp.Timestamp.Unix(), IsFromMe: true, IsRead: true, MediaType: draft.Kind, FileName: draft.FileName, Mimetype: draft.Mimetype, FileSize: draft.FileSize, IsPTT: draft.IsPTT, DeliveryStatus: "sent", ClientRequestID: clientRequestID}
+	sent := MessageItem{ID: resp.ID, ChatJID: chatJID, SenderJID: client.Store.ID.String(), Content: caption, Caption: caption, Timestamp: resp.Timestamp.Unix(), IsFromMe: true, IsRead: true, MediaType: draft.Kind, MediaDuration: draft.MediaDuration, FileName: draft.FileName, Mimetype: draft.Mimetype, FileSize: draft.FileSize, Waveform: draft.Waveform, IsPTT: draft.IsPTT, DeliveryStatus: "sent", ClientRequestID: clientRequestID}
 	s.addMessageToCache(chatJID, sent)
 	s.updateChatLastMessage(chatJID, sent, jid.Server == types.GroupServer)
 	s.persistAndEmitChat(chatJID)
@@ -281,7 +298,7 @@ func buildOutgoingMedia(draft stagedAttachment, caption string, upload whatsmeow
 	case "video":
 		return &waProto.Message{VideoMessage: &waE2E.VideoMessage{URL: url, DirectPath: directPath, Mimetype: proto.String(draft.Mimetype), Caption: proto.String(caption), FileLength: fileLength, MediaKey: mediaKey, FileSHA256: fileHash, FileEncSHA256: encHash}}
 	case "audio":
-		return &waProto.Message{AudioMessage: &waE2E.AudioMessage{URL: url, DirectPath: directPath, Mimetype: proto.String(draft.Mimetype), FileLength: fileLength, MediaKey: mediaKey, FileSHA256: fileHash, FileEncSHA256: encHash, PTT: proto.Bool(draft.IsPTT)}}
+		return &waProto.Message{AudioMessage: &waE2E.AudioMessage{URL: url, DirectPath: directPath, Mimetype: proto.String(draft.Mimetype), FileLength: fileLength, MediaKey: mediaKey, FileSHA256: fileHash, FileEncSHA256: encHash, PTT: proto.Bool(draft.IsPTT), Seconds: proto.Uint32(draft.MediaDuration), Waveform: waveformToBytes(draft.Waveform)}}
 	default:
 		return &waProto.Message{DocumentMessage: &waE2E.DocumentMessage{URL: url, DirectPath: directPath, Mimetype: proto.String(draft.Mimetype), Title: proto.String(draft.FileName), FileName: proto.String(draft.FileName), Caption: proto.String(caption), FileLength: fileLength, MediaKey: mediaKey, FileSHA256: fileHash, FileEncSHA256: encHash}}
 	}

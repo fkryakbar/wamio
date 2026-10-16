@@ -118,12 +118,24 @@ export function IsLoggedIn() {
   return window['go']['whatsapp']['WhatsAppService']['IsLoggedIn']();
 }
 
+export function LoadMessagesPage(arg1) {
+  return window['go']['whatsapp']['WhatsAppService']['LoadMessagesPage'](arg1);
+}
+
 export function Logout() {
   return window['go']['whatsapp']['WhatsAppService']['Logout']();
 }
 
 export function MarkChatRead(arg1) {
   return window['go']['whatsapp']['WhatsAppService']['MarkChatRead'](arg1);
+}
+
+export function MarkVisibleMessagesRead(arg1, arg2, arg3) {
+  return window['go']['whatsapp']['WhatsAppService']['MarkVisibleMessagesRead'](arg1, arg2, arg3);
+}
+
+export function MarkVoiceMessagePlayed(arg1, arg2) {
+  return window['go']['whatsapp']['WhatsAppService']['MarkVoiceMessagePlayed'](arg1, arg2);
 }
 
 export function OpenChat(arg1) {
@@ -144,6 +156,10 @@ export function ReactToMessage(arg1, arg2, arg3) {
 
 export function RequestOlderMessages(arg1, arg2, arg3, arg4, arg5) {
   return window['go']['whatsapp']['WhatsAppService']['RequestOlderMessages'](arg1, arg2, arg3, arg4, arg5);
+}
+
+export function RequestOlderMessagesPage(arg1) {
+  return window['go']['whatsapp']['WhatsAppService']['RequestOlderMessagesPage'](arg1);
 }
 
 export function RestoreLastSession() {
@@ -170,6 +186,10 @@ export function SendReply(arg1, arg2, arg3, arg4) {
   return window['go']['whatsapp']['WhatsAppService']['SendReply'](arg1, arg2, arg3, arg4);
 }
 
+export function SetChatArchived(arg1, arg2) {
+  return window['go']['whatsapp']['WhatsAppService']['SetChatArchived'](arg1, arg2);
+}
+
 export function SetContext(arg1) {
   return window['go']['whatsapp']['WhatsAppService']['SetContext'](arg1);
 }
@@ -180,6 +200,10 @@ export function StageAttachments(arg1, arg2) {
 
 export function StageDataURL(arg1, arg2, arg3, arg4) {
   return window['go']['whatsapp']['WhatsAppService']['StageDataURL'](arg1, arg2, arg3, arg4);
+}
+
+export function StageVoiceNote(arg1, arg2, arg3, arg4) {
+  return window['go']['whatsapp']['WhatsAppService']['StageVoiceNote'](arg1, arg2, arg3, arg4);
 }
 
 export function SwitchAccount(arg1) {

@@ -62,9 +62,15 @@ export function GetUserInfo():Promise<whatsapp.UserInfo>;
 
 export function IsLoggedIn():Promise<boolean>;
 
+export function LoadMessagesPage(arg1:whatsapp.MessageLoadRequest):Promise<whatsapp.MessagePage>;
+
 export function Logout():Promise<void>;
 
 export function MarkChatRead(arg1:string):Promise<void>;
+
+export function MarkVisibleMessagesRead(arg1:string,arg2:Array<string>,arg3:whatsapp.MessageCursor):Promise<whatsapp.ReadAckResult>;
+
+export function MarkVoiceMessagePlayed(arg1:string,arg2:string):Promise<void>;
 
 export function OpenChat(arg1:string):Promise<void>;
 
@@ -75,6 +81,8 @@ export function OpenExternalURL(arg1:string):Promise<void>;
 export function ReactToMessage(arg1:string,arg2:string,arg3:string):Promise<void>;
 
 export function RequestOlderMessages(arg1:string,arg2:string,arg3:boolean,arg4:number,arg5:number):Promise<void>;
+
+export function RequestOlderMessagesPage(arg1:whatsapp.MessageLoadRequest):Promise<void>;
 
 export function RestoreLastSession():Promise<whatsapp.RestoreSessionResult>;
 
@@ -88,10 +96,14 @@ export function SendRecentSticker(arg1:string,arg2:string,arg3:string):Promise<v
 
 export function SendReply(arg1:string,arg2:string,arg3:whatsapp.MessageReference,arg4:string):Promise<void>;
 
+export function SetChatArchived(arg1:string,arg2:boolean):Promise<whatsapp.ChatItem>;
+
 export function SetContext(arg1:context.Context):Promise<void>;
 
 export function StageAttachments(arg1:Array<string>,arg2:string):Promise<Array<whatsapp.AttachmentDraft>>;
 
 export function StageDataURL(arg1:string,arg2:string,arg3:string,arg4:boolean):Promise<whatsapp.AttachmentDraft>;
+
+export function StageVoiceNote(arg1:string,arg2:string,arg3:number,arg4:Array<number>):Promise<whatsapp.AttachmentDraft>;
 
 export function SwitchAccount(arg1:string):Promise<void>;
